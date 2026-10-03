@@ -28,7 +28,7 @@ on:
   workflow_dispatch:
     inputs:
       dry_run:
-        description: Report the candidate image; push nothing and open no PR
+        description: Find the candidate and mint the App token; push nothing and open no PR
         type: boolean
         default: false
 
@@ -36,8 +36,8 @@ permissions:
   contents: read
 
 jobs:
-  # No environment on this job: an environment changes the OIDC subject that
-  # the ECR role trusts, so the registry read stays here.
+  # The AWS role and the App key never share a job: this one reads the
+  # registry and holds no repository write.
   find:
     runs-on: ubuntu-26.04
     permissions:
@@ -148,7 +148,7 @@ jobs:
 
   open-pr:
     needs: find
-    if: needs.find.outputs.found == 'true' && !inputs.dry_run
+    if: needs.find.outputs.found == 'true'
     runs-on: ubuntu-26.04
     environment: agent-image-pr
     # One at a time, so two dispatches can't both find no PR and race the push.
@@ -159,7 +159,7 @@ jobs:
       contents: read
     steps:
       # Minted per run, scoped to this repository and to the two permissions a
-      # bump needs (v2.2+ honours the permission inputs; v1 ignored them).
+      # bump needs (v2.0.4+ honours the permission inputs; v1 ignored them).
       # Nothing is pushed before this succeeds.
       - name: Mint the App token
         id: app
@@ -209,7 +209,9 @@ jobs:
           fi
 
       - name: Open the bump PR
-        if: steps.existing.outputs.open == 'false'
+        # A dry run stops here, after the key, the environment and the
+        # token's access have all been exercised with no writes.
+        if: steps.existing.outputs.open == 'false' && !inputs.dry_run
         env:
           GH_TOKEN: ${{ steps.app.outputs.token }}
           APP_SLUG: ${{ steps.app.outputs.app-slug }}
