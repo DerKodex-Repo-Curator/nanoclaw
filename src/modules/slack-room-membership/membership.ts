@@ -38,11 +38,10 @@
  * silent instead of approval-spamming the operator.
  */
 import { resolveUnknownSenderPolicy } from '../../channels/channel-defaults.js';
-import type { InboundEvent } from '../../channels/adapter.js';
+import type { InboundEvent, InboundWorkspace } from '../../channels/adapter.js';
 import {
   botTokenKeyForInstance,
   slackAuthTest,
-  slackCall,
   slackConversationsInfo,
   slackConversationsMembers,
   slackPostMessage,
@@ -529,24 +528,13 @@ async function channelPointerText(agentGroupId: string, agentName: string, chann
   return `I'm ${name}. I answer in ${where}, ask me there.`;
 }
 
-/**
- * Whether Slack places a user in the bot's own workspace: the user's
- * users.info team_id against the bot token's auth.test team_id, Slack's
- * documented test for an external user. A failed lookup or a missing team
- * counts as no.
- */
-async function isOwnWorkspaceUser(token: string, userId: string): Promise<boolean> {
-  try {
-    const [bot, info] = await Promise.all([
-      slackAuthTest(token, 'membership'),
-      slackCall(token, 'users.info', { user: userId.replace(/^slack:/, '') }, 'membership'),
-    ]);
-    const userTeam = (info.user as { team_id?: unknown } | undefined)?.team_id;
-    return Boolean(bot.teamId) && userTeam === bot.teamId;
-  } catch (err) {
-    log.warn('slack-room-membership: users.info or auth.test failed placing a DM sender', { userId, err });
-    return false;
-  }
+/** Why the event does not place the sender in the bot's workspace, or null when it does. */
+function workspaceMismatch(workspace: InboundWorkspace | undefined): string | null {
+  const { sender, bot } = workspace ?? {};
+  if (!sender && !bot) return 'no sender or bot team';
+  if (!sender) return 'no sender team';
+  if (!bot) return 'no bot team';
+  return sender === bot ? null : 'teams differ';
 }
 
 /**
@@ -732,25 +720,29 @@ export async function slackChannelCardInterceptor(
     });
     // A bot that serves channels only is asked in them: point the sender
     // there. Nothing here is for its owner to act on, so no FYI. The pointer
-    // names its channels, so only its own workspace gets it; anyone else, or
-    // anyone Slack cannot place, gets no reply.
+    // names its channels, so it goes only to a sender the signed event places
+    // in the bot's own workspace; anyone else gets no reply.
     if (agentGroup?.channels) {
-      if (token && sender.userId && (await isOwnWorkspaceUser(token, sender.userId))) {
-        await declineAndNotify({
-          messagingGroupId: mg.id,
-          agentGroupId: agentGroup.id,
-          senderIdentity: sender.userId,
-          senderName: sender.name,
-          event,
-          declineText: await channelPointerText(agentGroup.id, agentGroup.name, agentGroup.channels),
-          fyiText: null,
-        });
-      } else {
-        log.info('Channels-only bot: DM sender not confirmed in its workspace — no reply', {
+      const mismatch = workspaceMismatch(event.message.workspace);
+      if (mismatch) {
+        // Not stamped: a stamp would keep an outsider's message on the box, and
+        // mute for a day a colleague whose event lacked a team.
+        log.info('Channels-only bot: DM sender not placed in its workspace — no reply', {
           messagingGroupId: mg.id,
           senderIdentity: sender.userId,
+          reason: mismatch,
         });
+        return 'handled';
       }
+      await declineAndNotify({
+        messagingGroupId: mg.id,
+        agentGroupId: agentGroup.id,
+        senderIdentity: sender.userId,
+        senderName: sender.name,
+        event,
+        declineText: await channelPointerText(agentGroup.id, agentGroup.name, agentGroup.channels),
+        fyiText: null,
+      });
       return 'handled';
     }
     const senderDisplay = sender.name ?? sender.userId ?? 'An unknown sender';
