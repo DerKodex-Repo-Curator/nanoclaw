@@ -125,22 +125,6 @@ export interface NewAgentGrantOptions {
   fetchImpl?: typeof fetch;
 }
 
-/**
- * Give a OneCLI agent NanoClaw just created the credentials a new agent had
- * before OneCLI 1.44: every secret in the project.
- *
- * Up to 1.43 a new agent started in `all` secret mode and the gateway injected
- * every matching vault secret. From 1.44 an agent holds only explicit grants and
- * a new one starts with none, so without this a new agent group gets no
- * credentials at all, including the model key setup stored. This runs only for
- * an agent created by this call; an existing agent's grants are never touched.
- *
- * On a gateway without the grants API (404, 1.43 and older) a new agent is
- * already in `all` mode, so nothing is attached. Any other failure deletes the
- * agent just created and throws: the spawn fails, and the next spawn creates it
- * again and retries, instead of leaving an agent with only some of the grants.
- * Returns the number of secrets attached, or null on a gateway without grants.
- */
 async function isUnknownRoute(res: Response): Promise<boolean> {
   const body = (await res.json().catch(() => null)) as { error?: { type?: unknown; message?: unknown } } | null;
   const error = body?.error;
@@ -150,7 +134,36 @@ async function isUnknownRoute(res: Response): Promise<boolean> {
   );
 }
 
-export async function grantProjectSecretsToNewAgent(
+/**
+ * Give a OneCLI agent NanoClaw just created the credentials every other agent
+ * in the project holds: the intersection of their secret grants, limited to
+ * secrets that still exist. With no other agent, every project secret.
+ *
+ * Up to 1.43 a new agent started in `all` secret mode and the gateway injected
+ * every matching vault secret. From 1.44 an agent holds only explicit grants and
+ * a new one starts with none, so without this a new agent group gets no
+ * credentials at all, including the model key setup stored. Grants are the
+ * marker: a credential every agent has (the model key, Vercel) is universal and
+ * a new agent gets it; one attached only to chosen agents (a Dial key a skill
+ * scoped) is not. Right after the 1.44 conversion every former `all` agent
+ * holds every secret, so the intersection is every secret, the old behavior.
+ * One agent with no secret grants makes the intersection empty: nothing is
+ * universal then. App connections are not considered or attached.
+ *
+ * "Other agents" are every agent in the project except the new one and
+ * OneCLI's own default agent (`isDefault`), which NanoClaw never uses and
+ * which a fresh gateway creates with no grants. If any of their grants cannot
+ * be read, the step fails rather than guessing.
+ *
+ * This runs only for an agent created by this call; an existing agent's grants
+ * are never touched. On a gateway without the grants API (1.43 and older) a new
+ * agent is already in `all` mode, so nothing is attached. Any other failure
+ * deletes the agent just created and throws: the spawn fails, and the next
+ * spawn creates it again and retries, instead of leaving an agent with only some
+ * of the grants. Returns the number of secrets attached, or null on a gateway
+ * without grants.
+ */
+export async function grantSharedSecretsToNewAgent(
   identifier: string,
   opts: NewAgentGrantOptions,
 ): Promise<number | null> {
@@ -169,8 +182,17 @@ export async function grantProjectSecretsToNewAgent(
     if (!Array.isArray(rows)) throw new Error(`GET ${path} did not return a list`);
     return rows as Array<Record<string, unknown>>;
   };
+  const grantedSecretIds = async (agentId: string): Promise<Set<string>> => {
+    const path = `/v1/agents/${encodeURIComponent(agentId)}/grants`;
+    const res = await request(path);
+    if (!res.ok) throw new Error(`GET ${path} returned ${res.status}`);
+    const secrets = ((await res.json()) as { secrets?: unknown }).secrets;
+    if (!Array.isArray(secrets)) throw new Error(`GET ${path} did not return a secrets list`);
+    return new Set(secrets.map((s) => (s as { secretId?: unknown }).secretId).filter((id) => typeof id === 'string'));
+  };
 
-  const agent = (await list('/v1/agents')).find((a) => a.identifier === identifier);
+  const agents = await list('/v1/agents');
+  const agent = agents.find((a) => a.identifier === identifier);
   if (typeof agent?.id !== 'string') throw new Error(`OneCLI agent ${identifier} not found after creating it`);
   const agentPath = `/v1/agents/${encodeURIComponent(agent.id)}`;
   try {
@@ -180,20 +202,29 @@ export async function grantProjectSecretsToNewAgent(
     // 404, such as "Agent not found.", is a failure.
     if (grants.status === 404 && (await isUnknownRoute(grants))) return null;
     if (!grants.ok) throw new Error(`GET ${agentPath}/grants returned ${grants.status}`);
-    const secrets = await list('/v1/secrets');
-    for (const secret of secrets) {
+    let ids: string[] = [];
+    for (const secret of await list('/v1/secrets')) {
       if (typeof secret.id !== 'string') throw new Error('a OneCLI secret has no id');
-      const res = await request(`${agentPath}/grants/secrets/${encodeURIComponent(secret.id)}`, 'PUT');
-      if (!res.ok) throw new Error(`attaching secret ${secret.id} returned ${res.status}`);
+      ids.push(secret.id);
     }
-    return secrets.length;
+    for (const other of agents) {
+      if (other === agent || other.isDefault === true) continue;
+      if (typeof other.id !== 'string') throw new Error('a OneCLI agent has no id');
+      const held = await grantedSecretIds(other.id);
+      ids = ids.filter((id) => held.has(id));
+    }
+    for (const id of ids) {
+      const res = await request(`${agentPath}/grants/secrets/${encodeURIComponent(id)}`, 'PUT');
+      if (!res.ok) throw new Error(`attaching secret ${id} returned ${res.status}`);
+    }
+    return ids.length;
   } catch (err) {
     const removed = await request(agentPath, 'DELETE').then(
       (res) => res.ok,
       () => false,
     );
     throw new Error(
-      `OneCLI: could not grant the project's secrets to new agent ${identifier} (${(err as Error).message}); ` +
+      `OneCLI: could not grant the shared secrets to new agent ${identifier} (${(err as Error).message}); ` +
         (removed
           ? 'the agent was deleted, so the next spawn creates it and retries'
           : `deleting it also failed: run \`onecli agents delete --id ${agent.id}\` before the next spawn`),
@@ -215,13 +246,13 @@ function ensureAgentReady(identifier: string, name: string): Promise<void> {
   const setup = (async () => {
     const agent = await onecli.ensureAgent({ name, identifier });
     if (!agent.created) return;
-    const attached = await grantProjectSecretsToNewAgent(identifier, {
+    const attached = await grantSharedSecretsToNewAgent(identifier, {
       baseUrl: onecliUrl || 'https://api.onecli.sh',
       apiKey: onecliApiKey,
       projectId: process.env.ONECLI_PROJECT_ID,
     });
     if (attached !== null) {
-      log.info('OneCLI agent created with the project secrets granted', {
+      log.info('OneCLI agent created with the shared secrets granted', {
         agentGroupId: identifier,
         secrets: attached,
       });

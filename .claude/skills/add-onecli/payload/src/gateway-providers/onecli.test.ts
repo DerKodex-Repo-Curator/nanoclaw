@@ -54,7 +54,7 @@ vi.mock('../env.js', () => ({
   }),
 }));
 
-import { contributionFromConfig, grantProjectSecretsToNewAgent, withProviderEnv } from './onecli.js';
+import { contributionFromConfig, grantSharedSecretsToNewAgent, withProviderEnv } from './onecli.js';
 import { getGatewayProviderRegistration } from './gateway-provider-registry.js';
 
 const provider = getGatewayProviderRegistration('onecli')!;
@@ -254,7 +254,7 @@ describe('OneCLI gateway package', () => {
     }
   });
 
-  it('grants every project secret to an agent it just created (the pre-1.44 default)', async () => {
+  it('grants the first agent in the project every project secret (the pre-1.44 default)', async () => {
     sdk.ensureAgent.mockResolvedValueOnce({ created: true });
     const gateway = fakeGateway();
     const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(gateway.fetch);
@@ -278,10 +278,74 @@ describe('OneCLI gateway package', () => {
     }
   });
 
+  const grant = (gateway: ReturnType<typeof fakeGateway>) =>
+    grantSharedSecretsToNewAgent('g1', { baseUrl: 'http://gw.test', fetchImpl: gateway.fetch });
+  const attached = (gateway: ReturnType<typeof fakeGateway>) =>
+    gateway.calls.filter((c) => c.startsWith('PUT ')).map((c) => c.split('/').at(-1));
+
+  it('grants a new agent the secrets every other agent holds, not one only some hold', async () => {
+    const gateway = fakeGateway({
+      vault: ['sec-model', 'sec-dial'],
+      others: [
+        { id: 'oc-a', secrets: ['sec-model', 'sec-dial'] },
+        { id: 'oc-b', secrets: ['sec-model'] },
+      ],
+    });
+    await expect(grant(gateway)).resolves.toBe(1);
+    expect(attached(gateway)).toEqual(['sec-model']);
+  });
+
+  it('never attaches a grant that points at a secret no longer in the vault', async () => {
+    const gateway = fakeGateway({
+      vault: ['sec-model'],
+      others: [
+        { id: 'oc-a', secrets: ['sec-model', 'sec-gone'] },
+        { id: 'oc-b', secrets: ['sec-gone', 'sec-model'] },
+      ],
+    });
+    await expect(grant(gateway)).resolves.toBe(1);
+    expect(attached(gateway)).toEqual(['sec-model']);
+  });
+
+  it("ignores OneCLI's own default agent, which a fresh gateway creates with no grants", async () => {
+    const gateway = fakeGateway({
+      others: [
+        { id: 'oc-default', secrets: [], isDefault: true },
+        { id: 'oc-a', secrets: ['sec-model', 'sec-vercel'] },
+      ],
+    });
+    await expect(grant(gateway)).resolves.toBe(2);
+    expect(attached(gateway)).toEqual(['sec-model', 'sec-vercel']);
+    expect(gateway.calls).not.toContain('GET /v1/agents/oc-default/grants');
+  });
+
+  it('attaches nothing when another agent deliberately holds no secrets', async () => {
+    const gateway = fakeGateway({
+      others: [
+        { id: 'oc-a', secrets: ['sec-model', 'sec-vercel'] },
+        { id: 'oc-empty', secrets: [] },
+      ],
+    });
+    await expect(grant(gateway)).resolves.toBe(0);
+    expect(attached(gateway)).toEqual([]);
+  });
+
+  it("fails and deletes the new agent when another agent's grants cannot be read", async () => {
+    const gateway = fakeGateway({
+      others: [
+        { id: 'oc-a', secrets: ['sec-model'] },
+        { id: 'oc-b', secrets: [], grantsStatus: 500 },
+      ],
+    });
+    await expect(grant(gateway)).rejects.toThrow(/oc-b\/grants returned 500.*the agent was deleted/);
+    expect(attached(gateway)).toEqual([]);
+    expect(gateway.calls.at(-1)).toBe('DELETE /v1/agents/oc-g1');
+  });
+
   it('attaches nothing on a gateway without the grants API, where a new agent is already in all mode', async () => {
     const gateway = fakeGateway({ grantsStatus: 404, grantsBody: UNKNOWN_ROUTE_404 });
     await expect(
-      grantProjectSecretsToNewAgent('g1', { baseUrl: 'http://gw.test/', fetchImpl: gateway.fetch }),
+      grantSharedSecretsToNewAgent('g1', { baseUrl: 'http://gw.test/', fetchImpl: gateway.fetch }),
     ).resolves.toBeNull();
     expect(gateway.calls).toEqual(['GET /v1/agents', 'GET /v1/agents/oc-g1/grants']);
   });
@@ -289,7 +353,7 @@ describe('OneCLI gateway package', () => {
   it('treats any other grants 404 (agent not found) as a failure, not as a gateway without grants', async () => {
     const gateway = fakeGateway({ grantsStatus: 404, grantsBody: AGENT_NOT_FOUND_404 });
     await expect(
-      grantProjectSecretsToNewAgent('g1', { baseUrl: 'http://gw.test', fetchImpl: gateway.fetch }),
+      grantSharedSecretsToNewAgent('g1', { baseUrl: 'http://gw.test', fetchImpl: gateway.fetch }),
     ).rejects.toThrow(/returned 404/);
     expect(gateway.calls).not.toContain('GET /v1/secrets');
   });
@@ -340,7 +404,7 @@ describe('OneCLI gateway package', () => {
   it('deletes the new agent and fails the spawn when a grant cannot be written', async () => {
     const gateway = fakeGateway({ putStatus: 500 });
     await expect(
-      grantProjectSecretsToNewAgent('g1', { baseUrl: 'http://gw.test', fetchImpl: gateway.fetch }),
+      grantSharedSecretsToNewAgent('g1', { baseUrl: 'http://gw.test', fetchImpl: gateway.fetch }),
     ).rejects.toThrow(/the agent was deleted, so the next spawn creates it and retries/);
     expect(gateway.calls.at(-1)).toBe('DELETE /v1/agents/oc-g1');
   });
@@ -348,7 +412,7 @@ describe('OneCLI gateway package', () => {
   it('names the manual cleanup when the new agent cannot be deleted either', async () => {
     const gateway = fakeGateway({ putStatus: 500, deleteStatus: 500 });
     await expect(
-      grantProjectSecretsToNewAgent('g1', { baseUrl: 'http://gw.test', fetchImpl: gateway.fetch }),
+      grantSharedSecretsToNewAgent('g1', { baseUrl: 'http://gw.test', fetchImpl: gateway.fetch }),
     ).rejects.toThrow('onecli agents delete --id oc-g1');
   });
 
@@ -470,6 +534,10 @@ function fakeGateway(
     putStatus?: number;
     putDelayMs?: number;
     deleteStatus?: number;
+    /** Agents besides the new one (oc-g1), with the secret ids each holds. */
+    others?: Array<{ id: string; secrets: string[]; isDefault?: boolean; grantsStatus?: number }>;
+    /** Secret ids in the vault. */
+    vault?: string[];
   } = {},
 ) {
   const calls: string[] = [];
@@ -481,10 +549,21 @@ function fakeGateway(
     const method = init?.method ?? 'GET';
     auth = (init?.headers as Record<string, string> | undefined)?.Authorization;
     calls.push(`${method} ${pathname}`);
-    if (pathname === '/v1/agents') return json([{ id: 'oc-g1', identifier: 'g1' }]);
+    const others = opts.others ?? [];
+    if (pathname === '/v1/agents')
+      return json([
+        { id: 'oc-g1', identifier: 'g1' },
+        ...others.map((o) => ({ id: o.id, identifier: o.id, isDefault: o.isDefault ?? false })),
+      ]);
+    const other = others.find((o) => pathname === `/v1/agents/${o.id}/grants`);
+    if (other && method === 'GET')
+      return json(
+        { mode: 'grants', connections: [], secrets: other.secrets.map((secretId) => ({ secretId })) },
+        other.grantsStatus,
+      );
     if (pathname === '/v1/agents/oc-g1/grants')
       return json(opts.grantsBody ?? { mode: 'grants', secrets: [] }, opts.grantsStatus);
-    if (pathname === '/v1/secrets') return json([{ id: 'sec-model' }, { id: 'sec-vercel' }]);
+    if (pathname === '/v1/secrets') return json((opts.vault ?? ['sec-model', 'sec-vercel']).map((id) => ({ id })));
     if (method === 'PUT') {
       if (opts.putDelayMs) await new Promise((r) => setTimeout(r, opts.putDelayMs));
       calls.push(`done ${pathname}`);
