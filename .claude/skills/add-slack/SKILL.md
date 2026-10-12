@@ -27,7 +27,7 @@ working; that migration is optional).
 ### 1. Copy the channel payload
 
 Fetch the `channels` branch and copy the payload into place (overwrite — the branch is canonical):
-```nc:copy from-branch:channels
+```nc:copy from-branch:team-agents/run-3-channels
 src/channels/slack.ts
 src/channels/slack-lib.ts
 src/channels/slack-lib.test.ts

@@ -90,7 +90,7 @@ own bot identity), DM onboarding (get-started prompts, per-thread DM titles),
 and their `env-file.ts` dotenv plumbing. They live on the `channels` branch;
 fetch and copy them into place (overwrite — the branch is canonical):
 
-```nc:copy from-branch:channels
+```nc:copy from-branch:team-agents/run-3-channels
 src/env-file.ts
 src/env-file.test.ts
 src/modules/slack-room-membership/index.ts
