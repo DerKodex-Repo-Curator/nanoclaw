@@ -141,6 +141,15 @@ export interface NewAgentGrantOptions {
  * again and retries, instead of leaving an agent with only some of the grants.
  * Returns the number of secrets attached, or null on a gateway without grants.
  */
+async function isUnknownRoute(res: Response): Promise<boolean> {
+  const body = (await res.json().catch(() => null)) as { error?: { type?: unknown; message?: unknown } } | null;
+  const error = body?.error;
+  return (
+    error?.type === 'invalid_request_error' ||
+    (typeof error?.message === 'string' && error.message.startsWith('Unrecognized request URL'))
+  );
+}
+
 export async function grantProjectSecretsToNewAgent(
   identifier: string,
   opts: NewAgentGrantOptions,
@@ -166,7 +175,10 @@ export async function grantProjectSecretsToNewAgent(
   const agentPath = `/v1/agents/${encodeURIComponent(agent.id)}`;
   try {
     const grants = await request(`${agentPath}/grants`);
-    if (grants.status === 404) return null;
+    // Only a gateway that does not know the route at all lacks grants (1.42
+    // answers `invalid_request_error`, "Unrecognized request URL"); any other
+    // 404, such as "Agent not found.", is a failure.
+    if (grants.status === 404 && (await isUnknownRoute(grants))) return null;
     if (!grants.ok) throw new Error(`GET ${agentPath}/grants returned ${grants.status}`);
     const secrets = await list('/v1/secrets');
     for (const secret of secrets) {
@@ -190,23 +202,43 @@ export async function grantProjectSecretsToNewAgent(
   }
 }
 
-async function ensureSession(input: GatewaySessionInput, signal: AbortSignal): Promise<GatewaySessionLease> {
-  // The OneCLI agent identifier is always the agent group id — stable across
-  // sessions and reversible via getAgentGroup() for approval routing.
-  const agent = await onecli.ensureAgent({ name: input.groupName, identifier: input.key.agentGroupId });
-  if (agent.created) {
-    const attached = await grantProjectSecretsToNewAgent(input.key.agentGroupId, {
+// One in-flight agent setup per agent group in this host process. A second
+// spawn for the same group joins the first one's promise instead of calling
+// ensureAgent itself: otherwise it would get 409 (created: false) and return
+// the agent's credentials before the creator had attached any grants, and a
+// failed attach would then delete an agent that session already uses.
+const agentSetup = new Map<string, Promise<void>>();
+
+function ensureAgentReady(identifier: string, name: string): Promise<void> {
+  const inFlight = agentSetup.get(identifier);
+  if (inFlight) return inFlight;
+  const setup = (async () => {
+    const agent = await onecli.ensureAgent({ name, identifier });
+    if (!agent.created) return;
+    const attached = await grantProjectSecretsToNewAgent(identifier, {
       baseUrl: onecliUrl || 'https://api.onecli.sh',
       apiKey: onecliApiKey,
       projectId: process.env.ONECLI_PROJECT_ID,
     });
     if (attached !== null) {
       log.info('OneCLI agent created with the project secrets granted', {
-        agentGroupId: input.key.agentGroupId,
+        agentGroupId: identifier,
         secrets: attached,
       });
     }
-  }
+  })();
+  agentSetup.set(identifier, setup);
+  const clear = () => {
+    if (agentSetup.get(identifier) === setup) agentSetup.delete(identifier);
+  };
+  setup.then(clear, clear);
+  return setup;
+}
+
+async function ensureSession(input: GatewaySessionInput, signal: AbortSignal): Promise<GatewaySessionLease> {
+  // The OneCLI agent identifier is always the agent group id — stable across
+  // sessions and reversible via getAgentGroup() for approval routing.
+  await ensureAgentReady(input.key.agentGroupId, input.groupName);
   const config = await onecli.getContainerConfig({ agent: input.key.agentGroupId });
   log.info('OneCLI gateway applied', { agentGroupId: input.key.agentGroupId, sessionId: input.key.sessionId });
   return {

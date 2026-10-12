@@ -266,7 +266,9 @@ describe('OneCLI gateway package', () => {
         'GET /v1/agents/oc-g1/grants',
         'GET /v1/secrets',
         'PUT /v1/agents/oc-g1/grants/secrets/sec-model',
+        'done /v1/agents/oc-g1/grants/secrets/sec-model',
         'PUT /v1/agents/oc-g1/grants/secrets/sec-vercel',
+        'done /v1/agents/oc-g1/grants/secrets/sec-vercel',
       ]);
       expect(gateway.auth).toBe('Bearer unused');
       expect(sdk.getContainerConfig).toHaveBeenCalledWith({ agent: 'g1' });
@@ -277,11 +279,62 @@ describe('OneCLI gateway package', () => {
   });
 
   it('attaches nothing on a gateway without the grants API, where a new agent is already in all mode', async () => {
-    const gateway = fakeGateway({ grantsStatus: 404 });
+    const gateway = fakeGateway({ grantsStatus: 404, grantsBody: UNKNOWN_ROUTE_404 });
     await expect(
       grantProjectSecretsToNewAgent('g1', { baseUrl: 'http://gw.test/', fetchImpl: gateway.fetch }),
     ).resolves.toBeNull();
     expect(gateway.calls).toEqual(['GET /v1/agents', 'GET /v1/agents/oc-g1/grants']);
+  });
+
+  it('treats any other grants 404 (agent not found) as a failure, not as a gateway without grants', async () => {
+    const gateway = fakeGateway({ grantsStatus: 404, grantsBody: AGENT_NOT_FOUND_404 });
+    await expect(
+      grantProjectSecretsToNewAgent('g1', { baseUrl: 'http://gw.test', fetchImpl: gateway.fetch }),
+    ).rejects.toThrow(/returned 404/);
+    expect(gateway.calls).not.toContain('GET /v1/secrets');
+  });
+
+  it('a concurrent spawn for a new group returns only after the creator has attached the grants', async () => {
+    sdk.ensureAgent.mockResolvedValueOnce({ created: true });
+    const gateway = fakeGateway({ putDelayMs: 20 });
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(gateway.fetch);
+    const first = new AbortController();
+    const second = new AbortController();
+    try {
+      await Promise.all([
+        provider.sessions.ensure(input('s1'), first.signal).then(() => gateway.calls.push('ready s1')),
+        provider.sessions.ensure(input('s2'), second.signal).then(() => gateway.calls.push('ready s2')),
+      ]);
+      const lastGrant = gateway.calls.lastIndexOf('done /v1/agents/oc-g1/grants/secrets/sec-vercel');
+      expect(lastGrant).toBeGreaterThan(-1);
+      expect(gateway.calls.indexOf('ready s2')).toBeGreaterThan(lastGrant);
+      expect(sdk.ensureAgent).toHaveBeenCalledTimes(1);
+    } finally {
+      first.abort();
+      second.abort();
+      fetchMock.mockRestore();
+    }
+  });
+
+  it('a failed first-time grant fails every concurrent spawn for the group and deletes the agent once', async () => {
+    sdk.ensureAgent.mockResolvedValueOnce({ created: true });
+    const gateway = fakeGateway({ putStatus: 500, putDelayMs: 20 });
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(gateway.fetch);
+    const first = new AbortController();
+    const second = new AbortController();
+    try {
+      const results = await Promise.allSettled([
+        provider.sessions.ensure(input('s1'), first.signal),
+        provider.sessions.ensure(input('s2'), second.signal),
+      ]);
+      expect(results.map((r) => r.status)).toEqual(['rejected', 'rejected']);
+      expect(gateway.calls.filter((c) => c === 'DELETE /v1/agents/oc-g1')).toHaveLength(1);
+      expect(sdk.getContainerConfig).not.toHaveBeenCalled();
+    } finally {
+      first.abort();
+      second.abort();
+      fetchMock.mockRestore();
+    }
   });
 
   it('deletes the new agent and fails the spawn when a grant cannot be written', async () => {
@@ -401,7 +454,24 @@ it.each(compatibilityFixtures)('preserves native OneCLI approval content: $name'
   await subscription;
 });
 
-function fakeGateway(opts: { grantsStatus?: number; putStatus?: number; deleteStatus?: number } = {}) {
+const UNKNOWN_ROUTE_404 = {
+  error: {
+    message:
+      'Unrecognized request URL (GET: /v1/agents/oc-g1/grants). Please see https://onecli.sh/docs/api-reference for available endpoints.',
+    type: 'invalid_request_error',
+  },
+};
+const AGENT_NOT_FOUND_404 = { error: { message: 'Agent not found.', type: 'not_found_error' } };
+
+function fakeGateway(
+  opts: {
+    grantsStatus?: number;
+    grantsBody?: unknown;
+    putStatus?: number;
+    putDelayMs?: number;
+    deleteStatus?: number;
+  } = {},
+) {
   const calls: string[] = [];
   let auth: string | undefined;
   const json = (body: unknown, status = 200) =>
@@ -412,9 +482,14 @@ function fakeGateway(opts: { grantsStatus?: number; putStatus?: number; deleteSt
     auth = (init?.headers as Record<string, string> | undefined)?.Authorization;
     calls.push(`${method} ${pathname}`);
     if (pathname === '/v1/agents') return json([{ id: 'oc-g1', identifier: 'g1' }]);
-    if (pathname === '/v1/agents/oc-g1/grants') return json({ mode: 'grants', secrets: [] }, opts.grantsStatus);
+    if (pathname === '/v1/agents/oc-g1/grants')
+      return json(opts.grantsBody ?? { mode: 'grants', secrets: [] }, opts.grantsStatus);
     if (pathname === '/v1/secrets') return json([{ id: 'sec-model' }, { id: 'sec-vercel' }]);
-    if (method === 'PUT') return json({}, opts.putStatus);
+    if (method === 'PUT') {
+      if (opts.putDelayMs) await new Promise((r) => setTimeout(r, opts.putDelayMs));
+      calls.push(`done ${pathname}`);
+      return json({}, opts.putStatus);
+    }
     if (method === 'DELETE') return new Response(null, { status: opts.deleteStatus ?? 204 });
     return json({ error: 'unexpected' }, 500);
   }) as typeof fetch;
