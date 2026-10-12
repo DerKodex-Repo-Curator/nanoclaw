@@ -17,7 +17,8 @@
 import { createSlackAdapter, type SlackAdapter } from '@chat-adapter/slack';
 
 import { readEnvFile } from '../env.js';
-import type { ChannelAdapter, ChannelContextDefaults, ChannelDefaults } from './adapter.js';
+import { log } from '../log.js';
+import type { ChannelAdapter, ChannelContextDefaults, ChannelDefaults, InboundWorkspace } from './adapter.js';
 import { createChatSdkBridge } from './chat-sdk-bridge.js';
 import { registerChannelAdapter } from './channel-registry.js';
 import { setSlackAuthorIsBotResolver } from './slack-a2a-guard.js';
@@ -138,6 +139,45 @@ export async function slackAuthorIsBot(slackAdapter: SlackAdapter, userId: strin
   return user?.isBot ?? null;
 }
 
+type EnvelopeHandler = (envelope: unknown, ...rest: unknown[]) => unknown;
+
+function nonEmpty(value: unknown): string | undefined {
+  return typeof value === 'string' && value !== '' ? value : undefined;
+}
+
+/**
+ * Sender's team from the event (`user_team`, else `team`); the bot's from the envelope's
+ * `authorizations[0]`, which the adapter drops before raw, so it is noted per event on the way in.
+ */
+export function trackSlackWorkspaces(
+  slackAdapter: SlackAdapter,
+): (raw: Record<string, unknown>) => InboundWorkspace | null {
+  const botTeams = new WeakMap<object, string>();
+  // Both are protected on the adapter class; shadowing them on this instance
+  // catches the webhook and Socket Mode paths alike.
+  const target = slackAdapter as unknown as Record<'routeSocketEvent' | 'processEventPayload', unknown>;
+  for (const method of ['routeSocketEvent', 'processEventPayload'] as const) {
+    const original = target[method];
+    if (typeof original !== 'function') {
+      log.warn('slack: adapter has no envelope dispatcher to read the bot workspace from', { method });
+      continue;
+    }
+    target[method] = function (this: unknown, envelope: unknown, ...rest: unknown[]) {
+      const { event, authorizations } = (envelope ?? {}) as { event?: unknown; authorizations?: unknown };
+      const team = Array.isArray(authorizations)
+        ? nonEmpty((authorizations[0] as { team_id?: unknown } | undefined)?.team_id)
+        : undefined;
+      if (team && event !== null && typeof event === 'object') botTeams.set(event, team);
+      return (original as EnvelopeHandler).call(this, envelope, ...rest);
+    };
+  }
+  return (raw) => {
+    const sender = nonEmpty(raw.user_team) ?? nonEmpty(raw.team);
+    const bot = botTeams.get(raw);
+    return sender || bot ? { sender, bot } : null;
+  };
+}
+
 /** Construction knobs for one Slack bot identity. */
 export interface SlackBridgeOptions {
   /**
@@ -189,7 +229,10 @@ export function createSlackBridge(options: SlackBridgeOptions = {}): ChannelAdap
   const bridge = createChatSdkBridge({
     adapter: slackAdapter,
     extractRawText: extractSlackRawText,
+    extractWorkspace: trackSlackWorkspaces(slackAdapter),
     instance: options.instanceKey, // undefined ⇒ default instance (keyed by channelType)
+    // Must stay 'concurrent': trackSlackWorkspaces finds the bot's team by raw's object identity, which a
+    // rehydrated message loses ('debounce' and 'burst' always, 'queue' when it waits), and the DM goes silent.
     concurrency: 'concurrent',
     supportsThreads: true,
     defaults: SLACK_DEFAULTS,

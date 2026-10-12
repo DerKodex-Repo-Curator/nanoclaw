@@ -27,12 +27,33 @@
  * approval cards render from. It is a pure function over an injected
  * SlackAdapter, so it is driven here with mocks; no live API is touched.
  */
-import type { SlackAdapter } from '@chat-adapter/slack';
-import { describe, it, expect, vi } from 'vitest';
+import crypto from 'crypto';
+import http from 'http';
+import type { AddressInfo } from 'net';
 
+import type { SlackAdapter } from '@chat-adapter/slack';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, it, expect, vi } from 'vitest';
+
+import { registerWebhookAdapter } from '../webhook-server.js';
+import type { ChannelAdapter, InboundMessage } from './adapter.js';
 import { getRegisteredChannelNames } from './channel-registry.js';
-import { resolveSlackConversation, slackAuthorIsBot } from './slack.js';
+import { createSlackBridge, resolveSlackConversation, slackAuthorIsBot } from './slack.js';
 import './index.js'; // the real barrel — triggers every channel's self-registration
+
+const SIGNING_SECRET = vi.hoisted(() => 'test-signing-secret');
+
+vi.mock('../webhook-server.js', () => ({ registerWebhookAdapter: vi.fn() }));
+// Only the Slack bridge's read is faked: webhook mode, no app token.
+vi.mock('../env.js', async (importOriginal) => {
+  const real = await importOriginal<typeof import('../env.js')>();
+  return {
+    ...real,
+    readEnvFile: (keys: string[]) =>
+      keys.includes('SLACK_BOT_TOKEN')
+        ? { SLACK_BOT_TOKEN: 'xoxb-test', SLACK_SIGNING_SECRET: SIGNING_SECRET }
+        : real.readEnvFile(keys),
+  };
+});
 
 describe('slack channel registration', () => {
   it('registers slack via the channel barrel', () => {
@@ -171,5 +192,103 @@ describe('resolveSlackConversation', () => {
       participantNames: ['name-U1', 'name-U3'],
       participantIds: ['U1', 'U3'],
     });
+  });
+});
+
+/**
+ * The workspace ids, end to end: a signed webhook (or a Socket Mode envelope)
+ * into createSlackBridge's adapter, out of the bridge's onInbound. Slack's Web
+ * API is a local stub, so nothing leaves the machine.
+ */
+describe('Slack workspaces on inbound messages', () => {
+  let api: http.Server;
+  let bridge: ChannelAdapter;
+  let chat: { webhooks: Record<string, (r: Request) => Promise<Response>>; getAdapter(name: string): unknown };
+  const received: InboundMessage[] = [];
+
+  beforeAll(async () => {
+    api = http.createServer((_req, res) => res.end('{"ok":true}'));
+    await new Promise<void>((r) => api.listen(0, '127.0.0.1', r));
+    process.env.SLACK_API_URL = `http://127.0.0.1:${(api.address() as AddressInfo).port}/api/`;
+  });
+
+  afterAll(() => {
+    api.close();
+    delete process.env.SLACK_API_URL;
+  });
+
+  beforeEach(async () => {
+    const { initTestDb } = await import('../db/connection.js');
+    const { runMigrations } = await import('../db/migrations/index.js');
+    await runMigrations(await initTestDb());
+    received.length = 0;
+    vi.mocked(registerWebhookAdapter).mockClear();
+    bridge = createSlackBridge()!;
+    await bridge.setup({
+      onInbound: (_platformId, _threadId, message) => {
+        received.push(message);
+      },
+      onInboundEvent: () => {},
+      onMetadata: () => {},
+      onAction: () => {},
+    });
+    chat = vi.mocked(registerWebhookAdapter).mock.calls[0][0] as unknown as typeof chat;
+  });
+
+  afterEach(async () => {
+    await bridge.teardown();
+    const { closeDb } = await import('../db/connection.js');
+    await closeDb();
+  });
+
+  let ts = 0;
+  function envelope(event: Record<string, unknown>, installTeam?: string) {
+    return {
+      type: 'event_callback',
+      team_id: 'T0HOST',
+      event: { type: 'message', channel: 'D0DM', channel_type: 'im', ts: `1.${++ts}`, user: 'U0SENDER', ...event },
+      ...(installTeam ? { authorizations: [{ team_id: installTeam, user_id: 'U0BOT', is_bot: true }] } : {}),
+    };
+  }
+
+  async function viaWebhook(payload: unknown): Promise<InboundMessage> {
+    const body = JSON.stringify(payload);
+    const at = String(Math.floor(Date.now() / 1000));
+    const sig = 'v0=' + crypto.createHmac('sha256', SIGNING_SECRET).update(`v0:${at}:${body}`).digest('hex');
+    const res = await chat.webhooks.slack(
+      new Request('http://localhost/webhook/slack', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'x-slack-signature': sig, 'x-slack-request-timestamp': at },
+        body,
+      }),
+    );
+    expect(res.status).toBe(200);
+    await vi.waitFor(() => expect(received).toHaveLength(1));
+    return received[0];
+  }
+
+  async function viaSocket(payload: unknown): Promise<InboundMessage> {
+    const adapter = chat.getAdapter('slack') as {
+      routeSocketEvent(body: unknown, type: string, ack: () => Promise<void>): Promise<void>;
+    };
+    await adapter.routeSocketEvent(payload, 'events_api', async () => {});
+    await vi.waitFor(() => expect(received).toHaveLength(1));
+    return received[0];
+  }
+
+  it("webhook: the sender's team from the event (user_team over team), the bot's from authorizations", async () => {
+    const message = await viaWebhook(envelope({ team: 'T0OURS', user_team: 'T0PARTNER' }, 'T0OURS'));
+    expect(message.workspace).toEqual({ sender: 'T0PARTNER', bot: 'T0OURS' });
+  });
+
+  it("Socket Mode: the bot's team survives the adapter rebuilding the envelope without authorizations", async () => {
+    const message = await viaSocket(envelope({ team: 'T0OURS' }, 'T0OURS'));
+    expect(message.workspace).toEqual({ sender: 'T0OURS', bot: 'T0OURS' });
+  });
+
+  it("never takes the envelope's team_id for the bot's, and is unset when the event names no team", async () => {
+    expect((await viaWebhook(envelope({ team: 'T0HOST' }))).workspace).toEqual({ sender: 'T0HOST', bot: undefined });
+    received.length = 0;
+    expect((await viaWebhook(envelope({}))).workspace).toBeUndefined();
   });
 });

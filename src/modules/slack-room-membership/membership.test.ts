@@ -14,7 +14,7 @@
  * trunk hooks forward-merge into this branch. Every test drives
  * handleSlackMembershipEvent with joinRecheckDelayMs: 0.
  */
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from 'vitest';
 
 const {
   mockApi,
@@ -228,8 +228,9 @@ import {
   setMessagingGroupDetachedAt,
 } from '../../db/messaging-groups.js';
 import { createSession } from '../../db/sessions.js';
+import { log } from '../../log.js';
 import { grantRole } from '../permissions/db/user-roles.js';
-import type { InboundEvent } from '../../channels/adapter.js';
+import type { InboundEvent, InboundWorkspace } from '../../channels/adapter.js';
 import type { MessagingGroup, MessagingGroupAgent, Session } from '../../types.js';
 import {
   clearOwnBotIdCache,
@@ -952,21 +953,40 @@ describe('slack channel-card interceptor — owner-presence rule (B2/D24)', () =
       }
     }
 
-    beforeEach(() => {
-      mockApi.slackCall.mockImplementation(async (_token: string, method: string, body: { user?: string }) => {
-        if (method !== 'users.info') throw new Error(`unexpected Slack call ${method}`);
-        return { ok: true, user: { id: body.user, team_id: HOME_TEAM } };
-      });
-    });
-
-    async function dmFrom(senderId: string): Promise<{ dm: MessagingGroup; event: InboundEvent }> {
+    /** A DM whose signed event names the sender's team and the bot's (both ours by default). */
+    async function dmFrom(
+      senderId: string,
+      { workspace }: { workspace?: InboundWorkspace } = { workspace: { sender: HOME_TEAM, bot: HOME_TEAM } },
+    ): Promise<{ dm: MessagingGroup; event: InboundEvent }> {
       const dm = await mg({
         id: `mg-dm-${senderId}`,
         platform_id: `slack:D${senderId}`,
         is_group: 0,
         unknown_sender_policy: 'request_approval',
       });
-      return { dm, event: mentionEvent(dm.platform_id, { isGroup: false, senderId, senderName: 'Sam' }) };
+      const event = mentionEvent(dm.platform_id, { isGroup: false, senderId, senderName: 'Sam' });
+      event.message.workspace = workspace;
+      return { dm, event };
+    }
+
+    function expectNoSlackCall(): void {
+      expect(mockApi.slackCall).not.toHaveBeenCalled();
+      expect(mockApi.slackAuthTest).not.toHaveBeenCalled();
+      expect(mockApi.slackPostMessage).not.toHaveBeenCalled();
+    }
+
+    let logInfo: MockInstance<typeof log.info>;
+    beforeEach(() => {
+      logInfo = vi.spyOn(log, 'info');
+    });
+    afterEach(() => {
+      logInfo.mockRestore();
+    });
+
+    /** A silent drop sends and stamps nothing; the log names which side failed. */
+    function expectSilentDrop(reason: string): void {
+      expect(mockDeclineAndNotify).not.toHaveBeenCalled();
+      expect(logInfo).toHaveBeenCalledWith(expect.stringContaining('no reply'), expect.objectContaining({ reason }));
     }
 
     it('points a sender in its own workspace to its channel as its assistant, sends no FYI, routes nothing', async () => {
@@ -986,9 +1006,8 @@ describe('slack channel-card interceptor — owner-presence rule (B2/D24)', () =
         declineText: "I'm Pixel Helper. I answer in <#C0TEAM>, ask me there.",
         fyiText: null,
       });
-      // Placed in the workspace by Slack, through the instance's own token.
-      expect(mockApi.slackCall).toHaveBeenCalledWith('xoxb-own', 'users.info', { user: 'U0TEAMMATE' }, 'membership');
-      expect(mockApi.slackAuthTest).toHaveBeenCalledWith('xoxb-own', 'membership');
+      // Placed in the workspace by the signed event alone: no Web API call.
+      expectNoSlackCall();
       expect(mockRecordDropped).toHaveBeenCalledTimes(1);
       expect(mockRouteInbound).not.toHaveBeenCalled();
       expect(mockRequestChannelApproval).not.toHaveBeenCalled();
@@ -996,18 +1015,14 @@ describe('slack channel-card interceptor — owner-presence rule (B2/D24)', () =
       expect(await getMessagingGroup(dm.id)).toMatchObject({ unknown_sender_policy: 'decline_notify' });
     });
 
-    it('a sender from another workspace (a Slack Connect user) gets no reply: no pointer, no FYI, nothing routed', async () => {
+    it('a sender from another workspace (a Slack Connect user) gets no reply: not stamped, no FYI, nothing routed', async () => {
       await seedChannelsOnlyBot(['C0TEAM']);
-      mockApi.slackCall.mockResolvedValue({
-        ok: true,
-        user: { id: 'U0PARTNER', team_id: 'T0PARTNER', is_stranger: false },
-      });
-      const { dm, event } = await dmFrom('U0PARTNER');
+      const { dm, event } = await dmFrom('U0PARTNER', { workspace: { sender: 'T0PARTNER', bot: HOME_TEAM } });
 
       expect(await intercept(dm, event)).toBe('handled');
 
-      expect(mockDeclineAndNotify).not.toHaveBeenCalled();
-      expect(mockApi.slackPostMessage).not.toHaveBeenCalled();
+      expectSilentDrop('teams differ');
+      expectNoSlackCall();
       expect(mockRouteInbound).not.toHaveBeenCalled();
       expect(mockRequestChannelApproval).not.toHaveBeenCalled();
       expect(await getMessagingGroupAgents(dm.id)).toHaveLength(0);
@@ -1016,39 +1031,34 @@ describe('slack channel-card interceptor — owner-presence rule (B2/D24)', () =
       );
     });
 
-    it.each<[string, () => void]>([
-      [
-        'users.info fails',
-        () => mockApi.slackCall.mockRejectedValue(new Error('slack users.info failed: user_not_found')),
-      ],
-      [
-        'users.info returns no team',
-        () => mockApi.slackCall.mockResolvedValue({ ok: true, user: { id: 'U0TEAMMATE' } }),
-      ],
-      [
-        'auth.test fails',
-        () => mockApi.slackAuthTest.mockRejectedValue(new Error('slack auth.test failed: invalid_auth')),
-      ],
-      ['auth.test returns no team', () => mockApi.slackAuthTest.mockResolvedValue({ userId: OWN_BOT })],
-      [
-        'neither lookup returns a team',
-        () => {
-          mockApi.slackAuthTest.mockResolvedValue({ userId: OWN_BOT });
-          mockApi.slackCall.mockResolvedValue({ ok: true, user: { id: 'U0TEAMMATE' } });
-        },
-      ],
-      ['the instance has no bot token', () => mockEnv.readEnvValue.mockReturnValue(undefined)],
-    ])('a sender Slack cannot place gets no reply (%s)', async (_label, arrange) => {
+    it.each<[string, InboundWorkspace | undefined, string]>([
+      ['the event names no workspace', undefined, 'no sender or bot team'],
+      ["the sender's team is missing", { bot: HOME_TEAM }, 'no sender team'],
+      ["the bot's team is missing", { sender: HOME_TEAM }, 'no bot team'],
+      ['neither team is named', {}, 'no sender or bot team'],
+      ['both teams are empty', { sender: '', bot: '' }, 'no sender or bot team'],
+    ])('a sender the event does not place gets no reply, not stamped (%s)', async (_label, workspace, reason) => {
       await seedChannelsOnlyBot(['C0TEAM']);
-      arrange();
+      const { dm, event } = await dmFrom('U0TEAMMATE', { workspace });
+
+      expect(await intercept(dm, event)).toBe('handled');
+
+      expectSilentDrop(reason);
+      expectNoSlackCall();
+      expect(mockRouteInbound).not.toHaveBeenCalled();
+      expect(mockRequestChannelApproval).not.toHaveBeenCalled();
+    });
+
+    it('the instance has no bot token in .env: the signed event still places the sender', async () => {
+      await seedChannelsOnlyBot(['C0TEAM']);
+      mockEnv.readEnvValue.mockReturnValue(undefined);
       const { dm, event } = await dmFrom('U0TEAMMATE');
 
       expect(await intercept(dm, event)).toBe('handled');
 
-      expect(mockDeclineAndNotify).not.toHaveBeenCalled();
-      expect(mockApi.slackPostMessage).not.toHaveBeenCalled();
-      expect(mockRouteInbound).not.toHaveBeenCalled();
-      expect(mockRequestChannelApproval).not.toHaveBeenCalled();
+      expect(mockDeclineAndNotify).toHaveBeenCalledWith(
+        expect.objectContaining({ declineText: "I'm Pixel. I answer in <#C0TEAM>, ask me there.", fyiText: null }),
+      );
     });
 
     it('names every channel it serves, and falls back to the agent name', async () => {
