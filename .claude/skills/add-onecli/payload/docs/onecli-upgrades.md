@@ -4,7 +4,7 @@ NanoClaw talks to the OneCLI gateway (credential vault + egress proxy) through `
 
 There is deliberately **no runtime version check, and setup does not migrate the gateway for you**: the gateway is a separate out-of-band component, and the migrator is your coding agent running `/update-nanoclaw`. The update does not detect a pin move on its own. From 2026.10.0 on, release notes that move the `onecli-gateway` pin carry a `[BREAKING]` line, which stops the update until this doc has been followed; earlier pin moves were not marked, so an older gateway can lag behind its pin. The Detect step below shows whether yours does. (Setup detects a pre-`/v1` gateway and points at this doc, but never upgrades it.) Run the steps below verbatim.
 
-**Supported version: exactly the pin (today 1.42.0).** OneCLI 1.43 and later remove the agent secret-assignment API this integration uses (`onecli agents set-secrets`), so 1.43+ is not supported for now. Never upgrade past the pin, and never rerun the upstream installer (`curl … onecli.sh/install | sh`) without `ONECLI_VERSION` set to the pin: without it, the installer installs the newest release. Rerunning `/add-onecli` does not fix a wrong version either, because setup reuses any healthy gateway without checking which version it runs.
+**Supported version: exactly the pin (today 1.45.0).** This integration attaches secrets to agents through the agent grants API, which OneCLI added in 1.44; on an older gateway those commands fail with `404`. OneCLI 2.x is a rewrite and is not supported. Never upgrade past the pin, and never rerun the upstream installer (`curl … onecli.sh/install | sh`) without `ONECLI_VERSION` set to the pin: without it, the installer installs the newest release. Rerunning `/add-onecli` does not fix a wrong version either, because setup reuses any healthy gateway without checking which version it runs.
 
 ## 1. Detect
 
@@ -63,7 +63,13 @@ Then pull and restart:
 cd ~/.onecli && env -u ONECLI_VERSION docker compose pull onecli && env -u ONECLI_VERSION docker compose up -d
 ```
 
-**If a gateway newer than the pin has started, even briefly:** it can migrate its database, and going back to the pin does not undo that. Put the gateway back on the pin (step 2), then check `docker logs onecli 2>&1 | grep -iE 'migrat|error'`. In testing, rolling back from 1.43.3 worked; from 1.45.0 it left a `policy_rule_identities.agent_group_id does not exist` error at startup. Access rules and approvals were not checked either time. If you see a database error, restore a backup taken before the newer version ran (the one from step 2, if you took it in time). There is no other tested repair, so otherwise [open an issue](https://github.com/nanocoai/nanoclaw/issues) with the log lines.
+**Moving from 1.43 or older to 1.44 or later** changes how agents get secrets. Before 1.44 an agent in `all` mode, the default for a new agent, received every vault secret whose host matched. From 1.44 an agent receives only the secrets attached to it:
+
+- On its first start the new gateway converts each `all`-mode agent into one with an explicit grant for every secret in the vault at that moment, so existing agents keep exactly the access they had. Agents already in `selective` mode keep their list. Check the conversion: `docker logs onecli 2>&1 | grep grant-conversion` must report `0 failed`.
+- A secret added after the upgrade reaches only the agents it is attached to (`onecli agents grants attach-secret`). When NanoClaw creates the agent for a new agent group, it attaches every secret already in the vault, as the old default did.
+- `onecli agents set-secrets`, `onecli agents secrets` and `onecli agents set-secret-mode` answer `410 Gone`. Use `onecli agents grants list|attach-secret|detach-secret`, which need the `onecli-cli` pin below.
+
+**If a gateway newer than the pin has started, even briefly:** it can migrate its database, and going back to the pin does not undo that. Put the gateway back on the pin (step 2), then check `docker logs onecli 2>&1 | grep -iE 'migrat|error'`. Access rules and approvals were not checked in testing. If you see a database error, restore a backup taken before the newer version ran (the one from step 2, if you took it in time). There is no other tested repair, so otherwise [open an issue](https://github.com/nanocoai/nanoclaw/issues) with the log lines.
 
 ## 3. Verify
 
@@ -80,7 +86,7 @@ docker inspect -f '{{.Config.Image}}' onecli    # gateway host: must print ghcr.
 curl -s "$GW/api/health"                        # its "version" must be the pin, or "unknown"
 ```
 
-If the tag is not the pin, go back to step 2: the pin is not saved, or the compose file does not use it. If `version` reports 1.43 or later, this gateway is not supported; roll back to the pin (step 4). From a NanoClaw host that only reaches a remote gateway, the `version` field is the only check; it says `unknown` on some builds, so then check the tag on the gateway host.
+If the tag is not the pin, go back to step 2: the pin is not saved, or the compose file does not use it. If `version` reports anything other than the pin, put the gateway on the pin (step 2). From a NanoClaw host that only reaches a remote gateway, the `version` field is the only check; it says `unknown` on some builds, so then check the tag on the gateway host.
 
 **Verify the bind interface (container reachability).** Agent containers reach the gateway over the docker bridge (`host.docker.internal` → e.g. `172.17.0.1`), so a server bound only to `127.0.0.1` boots clean host-side while every credentialed call from containers dies at the proxy:
 
@@ -111,6 +117,8 @@ cd ~/.onecli && (umask 077 && P=<old-version> && { printf '%s\n' "$P" | grep -Eq
 If the old gateway ran `:latest`, `latest` now means a different image. Give the image ID you noted in the Detect step a tag first (`docker tag <image-id> ghcr.io/onecli/onecli:rollback`) and use `rollback` as `<old-version>`.
 
 If the NanoClaw update itself is being rolled back, also pin `@onecli-sh/sdk` back to its previous version in `package.json` and run `pnpm install`. Stored secrets survive in both directions. Access settings may not: grants and policies changed on the newer gateway are not carried back, so check that agents still get their credentials after a rollback.
+
+**Rolling back from 1.44 or later to 1.43 or older needs the backup from step 2.** Without it, the old gateway starts with a `policy_rule_identities.agent_group_id does not exist` error, and every agent the upgrade converted is left in `selective` mode with an empty secret list, so it gets no credentials (tested from 1.45.0 to 1.42.0). Restore the backup into a new, empty database. If you have no backup, put each NanoClaw agent back in `all` mode on the old gateway with `onecli agents set-secret-mode --id <agent-id> --mode all`, and check that it gets its credentials again.
 
 ## The CLI binary (`onecli-cli` pin)
 

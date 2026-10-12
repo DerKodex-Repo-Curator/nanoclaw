@@ -87,17 +87,17 @@ onecli secrets list | grep -i vercel
 
 ### Assign the secret to all agents
 
-OneCLI uses selective secret mode — secrets must be explicitly assigned to each agent. Get the Vercel secret ID from the output above, then assign it to every agent:
+A OneCLI agent receives only the secrets attached to it. Get the Vercel secret ID from the output above, then attach it to every existing agent (an agent NanoClaw creates later gets every secret already in the vault, this one included). Attaching adds this one secret and leaves each agent's other grants alone:
 
 ```bash
-# set-secrets replaces the entire list — read and merge for each agent.
 VERCEL_SECRET_ID=$(onecli secrets list | jq -r '.data[] | select(.name | test("(?i)vercel")) | .id' | head -1)
 for agent in $(onecli agents list | jq -r '.data[].id'); do
-  CURRENT=$(onecli agents secrets --id "$agent" | jq -r '[.data[]] | join(",")')
-  MERGED=$(printf '%s' "$CURRENT,$VERCEL_SECRET_ID" | tr ',' '\n' | sort -u | paste -sd ',' -)
-  onecli agents set-secrets --id "$agent" --secret-ids "$MERGED"
+  onecli agents grants attach-secret --id "$agent" --secret-id "$VERCEL_SECRET_ID" >/dev/null \
+    || echo "could not attach the Vercel secret to agent $agent" >&2
 done
 ```
+
+Check one agent with `onecli agents grants list --id <agent-id>`. This needs a OneCLI gateway with the grants API (1.44 or later; see `/add-onecli`).
 
 ## Phase 4: Ensure Vercel CLI in Container Image
 
