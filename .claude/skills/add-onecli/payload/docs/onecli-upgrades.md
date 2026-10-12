@@ -57,17 +57,28 @@ cd ~/.onecli && (umask 077 && F=~/onecli-db-backup-$(date +%Y%m%d-%H%M%S).sql &&
 
 It prints the new file only when the dump is complete. If the dump fails or stops early, it says so and leaves no file behind; a leftover file ending in `.part` is not a backup. Only you can read the file. `postgres` is the database service in the stock compose file; use your service's name if it differs. Restoring it was tested once, from 1.45.0 back to 1.42.0: loaded with `psql` into a new, empty database, it brought the gateway back without the startup error and with its stored secret. There is no restore command in this guide yet. Stored secrets are encrypted with a key kept outside the database. By default it is the `secret-encryption-key` file in the `app-data` volume; if you set `SECRET_ENCRYPTION_KEY` yourself, it is wherever you set it. Either way, the dump alone does not recover secrets without that key.
 
+**Moving from 1.43 or older to 1.44 or later** changes how agents get secrets, and deletes rules. Before 1.44 an agent in `all` mode, the default for a new agent, received every vault secret whose host matched, unless a policy rule blocked it. From 1.44 an agent receives only the secrets attached to it, and project policy rules can no longer be written. On its first start the new gateway converts the project once:
+
+- Each `all`-mode agent gets an explicit grant for **every** secret in the vault at that moment. Agents already in `selective` mode keep their list.
+- Every custom project **network or behavioral rule is deleted**, including `block` rules. An agent that a rule kept away from a host now receives that host's secret. The conversion log line counts them (`deleted: N network, N behavioral`).
+- `onecli agents set-secrets`, `onecli agents secrets` and `onecli agents set-secret-mode` answer `410 Gone` afterwards. Use `onecli agents grants list|attach-secret|detach-secret`, which need the `onecli-cli` pin below.
+
+Before you pull, while the old gateway still runs, list the rules the conversion will delete and check for `/add-dial-tool`, which keeps unchosen agents away from Dial with exactly such a rule. `policy rules` needs CLI 2.6 or later: install the `onecli-cli` pin first ([below](#the-cli-binary-onecli-cli-pin)); it also works against the old gateway.
+
+```bash
+onecli policy rules list --status published | jq -r '.[] | select(any(.targets[]?; .kind == "network")) | "\(.action)  \(.name)  \([.targets[].hostPattern] | join(","))"'
+onecli secrets list | jq -r '.data[] | select(.name | test("(?i)dial")) | "\(.name)  \(.hostPattern)"'
+```
+
+If the first command prints any rule you rely on, do not upgrade yet: after the upgrade, access can only be narrowed by detaching secrets from agents. If it prints a `block` rule for `api.getdial.ai` (named `Dial: blocked agents`), or the second command prints a Dial secret, `/add-dial-tool` is installed. It still needs gateway 1.42, so either stay on 1.42 until `/add-dial-tool` supports grants, or remove the Dial secret before upgrading (`onecli secrets delete --id <id>`) and accept that no agent can use Dial until then. If you have already upgraded, detach the Dial secret from every agent that should not have it: `onecli agents grants detach-secret --id <agent-id> --secret-id <dial-secret-id>`.
+
 Then pull and restart:
 
 ```bash
 cd ~/.onecli && env -u ONECLI_VERSION docker compose pull onecli && env -u ONECLI_VERSION docker compose up -d
 ```
 
-**Moving from 1.43 or older to 1.44 or later** changes how agents get secrets. Before 1.44 an agent in `all` mode, the default for a new agent, received every vault secret whose host matched. From 1.44 an agent receives only the secrets attached to it:
-
-- On its first start the new gateway converts each `all`-mode agent into one with an explicit grant for every secret in the vault at that moment, so existing agents keep exactly the access they had. Agents already in `selective` mode keep their list. Check the conversion: `docker logs onecli 2>&1 | grep grant-conversion` must report `0 failed`.
-- A secret added after the upgrade reaches only the agents it is attached to (`onecli agents grants attach-secret`). When NanoClaw creates the agent for a new agent group, it attaches every secret already in the vault, as the old default did.
-- `onecli agents set-secrets`, `onecli agents secrets` and `onecli agents set-secret-mode` answer `410 Gone`. Use `onecli agents grants list|attach-secret|detach-secret`, which need the `onecli-cli` pin below.
+Then check the conversion: `docker logs onecli 2>&1 | grep grant-conversion` must report `0 failed`. From now on a secret added to the vault reaches only the agents it is attached to (`onecli agents grants attach-secret`). When NanoClaw creates the agent for a new agent group, it attaches every secret already in the vault, as the old `all` default did.
 
 **If a gateway newer than the pin has started, even briefly:** it can migrate its database, and going back to the pin does not undo that. Put the gateway back on the pin (step 2), then check `docker logs onecli 2>&1 | grep -iE 'migrat|error'`. Access rules and approvals were not checked in testing. If you see a database error, restore a backup taken before the newer version ran (the one from step 2, if you took it in time). There is no other tested repair, so otherwise [open an issue](https://github.com/nanocoai/nanoclaw/issues) with the log lines.
 
@@ -125,7 +136,7 @@ If the NanoClaw update itself is being rolled back, also pin `@onecli-sh/sdk` ba
 The `onecli` host CLI is pinned the same way, under `onecli-cli` in `.claude/skills/add-onecli/versions.json`. Setup installs exactly that version by direct release download — it never resolves "latest". When an update moves this pin, replace the binary with the pinned release:
 
 ```bash
-onecli --version                                            # detect: what is installed
+onecli version                                              # detect: what is installed
 V=<onecli-cli pin from .claude/skills/add-onecli/versions.json>
 OS=$(uname -s | tr '[:upper:]' '[:lower:]')                 # darwin | linux
 ARCH=$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')   # amd64 | arm64
@@ -133,7 +144,7 @@ curl -fsSL -o /tmp/onecli.tgz \
   "https://github.com/onecli/onecli-cli/releases/download/v${V}/onecli_${V}_${OS}_${ARCH}.tar.gz"
 tar -xzf /tmp/onecli.tgz -C /tmp
 install -m 0755 /tmp/onecli "$(command -v onecli || echo ~/.local/bin/onecli)"
-onecli --version                                            # verify: must match the onecli-cli pin
+onecli version                                              # verify: must match the onecli-cli pin
 ```
 
 To roll back, run the same block after reverting `.claude/skills/add-onecli/versions.json` (or checking out the previous NanoClaw version). The CLI is stateless — vault data lives in the gateway, so swapping the binary in either direction loses nothing.
