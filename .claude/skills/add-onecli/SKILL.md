@@ -54,6 +54,7 @@ When NanoClaw creates the agent, on the group's first spawn, it attaches the
 secrets held by every agent that holds any secret. OneCLI's own default agent
 and agents with no secrets are not counted. So a credential attached to every
 agent reaches new groups too; to restrict one, attach it only to chosen agents.
+If only one agent holds secrets, new agents get that agent's whole set.
 With no such agent, the default agent's secrets are used if it has any (true
 right after a 1.44 upgrade). Otherwise, on a fresh gateway, the first NanoClaw
 agent gets every stored credential, including ones attached to no agent: attach
