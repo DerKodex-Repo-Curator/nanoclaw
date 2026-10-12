@@ -135,9 +135,9 @@ async function isUnknownRoute(res: Response): Promise<boolean> {
 }
 
 /**
- * Give a OneCLI agent NanoClaw just created the credentials every other agent
- * in the project holds: the intersection of their secret grants, limited to
- * secrets that still exist. With no other agent, every project secret.
+ * Give a OneCLI agent NanoClaw just created the credentials that every agent
+ * holding any secret holds: the intersection of their secret grants, limited to
+ * secrets that still exist.
  *
  * Up to 1.43 a new agent started in `all` secret mode and the gateway injected
  * every matching vault secret. From 1.44 an agent holds only explicit grants and
@@ -147,13 +147,17 @@ async function isUnknownRoute(res: Response): Promise<boolean> {
  * a new agent gets it; one attached only to chosen agents (a Dial key a skill
  * scoped) is not. Right after the 1.44 conversion every former `all` agent
  * holds every secret, so the intersection is every secret, the old behavior.
- * One agent with no secret grants makes the intersection empty: nothing is
- * universal then. App connections are not considered or attached.
+ * App connections are not considered or attached.
  *
- * "Other agents" are every agent in the project except the new one and
- * OneCLI's own default agent (`isDefault`), which NanoClaw never uses and
- * which a fresh gateway creates with no grants. If any of their grants cannot
- * be read, the step fails rather than guessing.
+ * Counted agents: every agent except the new one, OneCLI's own default agent
+ * (`isDefault`, which NanoClaw never uses), and agents holding no secret. An
+ * empty agent (one being set up right now, one left behind by a failed setup,
+ * or another app's) narrows nothing; otherwise one such agent would leave every
+ * later agent with nothing too. With no counted agent, the default agent's
+ * secrets are used if it holds any (after the 1.44 conversion it holds every
+ * secret that existed); on a fresh gateway, every secret in the vault, including
+ * ones attached to no agent. If any grants read fails, the step fails rather
+ * than guessing.
  *
  * This runs only for an agent created by this call; an existing agent's grants
  * are never touched. On a gateway without the grants API (1.43 and older) a new
@@ -202,17 +206,23 @@ export async function grantSharedSecretsToNewAgent(
     // 404, such as "Agent not found.", is a failure.
     if (grants.status === 404 && (await isUnknownRoute(grants))) return null;
     if (!grants.ok) throw new Error(`GET ${agentPath}/grants returned ${grants.status}`);
-    let ids: string[] = [];
+    const vault: string[] = [];
     for (const secret of await list('/v1/secrets')) {
       if (typeof secret.id !== 'string') throw new Error('a OneCLI secret has no id');
-      ids.push(secret.id);
+      vault.push(secret.id);
     }
+    // The secret sets of the counted agents, and the default agent's as the base case.
+    const counted: Set<string>[] = [];
+    const fallback: Set<string>[] = [];
     for (const other of agents) {
-      if (other === agent || other.isDefault === true) continue;
+      if (other === agent) continue;
       if (typeof other.id !== 'string') throw new Error('a OneCLI agent has no id');
       const held = await grantedSecretIds(other.id);
-      ids = ids.filter((id) => held.has(id));
+      if (held.size === 0) continue;
+      (other.isDefault === true ? fallback : counted).push(held);
     }
+    const basis = counted.length ? counted : fallback;
+    const ids = vault.filter((id) => basis.every((held) => held.has(id)));
     for (const id of ids) {
       const res = await request(`${agentPath}/grants/secrets/${encodeURIComponent(id)}`, 'PUT');
       if (!res.ok) throw new Error(`attaching secret ${id} returned ${res.status}`);
@@ -240,17 +250,31 @@ export async function grantSharedSecretsToNewAgent(
 // failed attach would then delete an agent that session already uses.
 const agentSetup = new Map<string, Promise<void>>();
 
+// Grant steps for new agents run one at a time across all groups, so a new
+// agent's set is computed only after every earlier new agent in this process
+// holds its full grants. An agent created meanwhile still has no grants and is
+// not counted. Existing agents never enter this queue.
+let grantQueue: Promise<unknown> = Promise.resolve();
+
+function oneAtATime<T>(task: () => Promise<T>): Promise<T> {
+  const run = grantQueue.then(task, task);
+  grantQueue = run.catch(() => undefined);
+  return run;
+}
+
 function ensureAgentReady(identifier: string, name: string): Promise<void> {
   const inFlight = agentSetup.get(identifier);
   if (inFlight) return inFlight;
   const setup = (async () => {
     const agent = await onecli.ensureAgent({ name, identifier });
     if (!agent.created) return;
-    const attached = await grantSharedSecretsToNewAgent(identifier, {
-      baseUrl: onecliUrl || 'https://api.onecli.sh',
-      apiKey: onecliApiKey,
-      projectId: process.env.ONECLI_PROJECT_ID,
-    });
+    const attached = await oneAtATime(() =>
+      grantSharedSecretsToNewAgent(identifier, {
+        baseUrl: onecliUrl || 'https://api.onecli.sh',
+        apiKey: onecliApiKey,
+        projectId: process.env.ONECLI_PROJECT_ID,
+      }),
+    );
     if (attached !== null) {
       log.info('OneCLI agent created with the shared secrets granted', {
         agentGroupId: identifier,

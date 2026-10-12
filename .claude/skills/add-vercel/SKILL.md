@@ -87,7 +87,7 @@ onecli secrets list | grep -i vercel
 
 ### Assign the secret to all agents
 
-A OneCLI agent receives only the secrets attached to it. Get the Vercel secret ID from the output above, then attach it to every existing agent (an agent NanoClaw creates later gets the secrets every existing agent holds, so it gets this one too). Attaching adds this one secret and leaves each agent's other grants alone:
+A OneCLI agent receives only the secrets attached to it. Get the Vercel secret ID from the output above, then attach it to every existing agent (an agent NanoClaw creates later gets the secrets every agent with secrets holds, so it gets this one too). Attaching adds this one secret and leaves each agent's other grants alone:
 
 ```bash
 VERCEL_SECRET_ID=$(onecli secrets list | jq -r '.data[] | select(.name | test("(?i)vercel")) | .id' | head -1)

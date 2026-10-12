@@ -51,12 +51,15 @@ pnpm exec tsx .claude/skills/add-onecli/scripts/setup.ts
 Provider skills such as `/add-opencode` store model credentials here through the
 gateway seam. An agent group's OneCLI agent holds only the secrets attached to it.
 When NanoClaw creates the agent, on the group's first spawn, it attaches the
-secrets every existing agent holds (all secrets for the first agent; OneCLI's
-own default agent is not counted). So a credential attached to every agent
-reaches new groups too, and to restrict one, attach it only to chosen agents.
-One agent with no secrets means nothing is shared, so a new agent gets none. A
-secret stored later is not attached to existing agents: attach it to each group
-that needs it with
+secrets held by every agent that holds any secret. OneCLI's own default agent
+and agents with no secrets are not counted. So a credential attached to every
+agent reaches new groups too; to restrict one, attach it only to chosen agents.
+With no such agent, the default agent's secrets are used if it has any (true
+right after a 1.44 upgrade). Otherwise, on a fresh gateway, the first NanoClaw
+agent gets every stored credential, including ones attached to no agent: attach
+a restricted credential to its chosen agents before the first spawn, or detach
+it afterwards. A secret stored later is not attached to existing agents: attach
+it to each group that needs it with
 `onecli agents grants attach-secret --id <agent-id> --secret-id <secret-id>`
 (`onecli agents list` maps the group id, shown as `identifier`, to `<agent-id>`).
 Attaching adds one secret and leaves the agent's other grants alone. Verify the

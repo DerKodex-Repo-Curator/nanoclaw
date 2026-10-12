@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { GatewayApprovalRequest, GatewaySessionInput } from './gateway-provider-registry.js';
 
 const sdk = vi.hoisted(() => ({
-  ensureAgent: vi.fn(async () => ({ created: false })),
+  ensureAgent: vi.fn(async (_input: { name: string; identifier: string }) => ({ created: false })),
   getContainerConfig: vi.fn(async () => ({
     env: { HTTPS_PROXY: 'http://host.docker.internal:15001' },
     caCertificate: 'fixture-ca',
@@ -61,6 +61,13 @@ const provider = getGatewayProviderRegistration('onecli')!;
 const scope = { ownsAgentGroup: vi.fn(async (id: string) => id === 'g1') };
 const subscribe = (decide: Parameters<typeof provider.approvals.subscribe>[0], signal: AbortSignal) =>
   provider.approvals.subscribe(decide, signal, undefined, scope);
+const groupInput = (group: string): GatewaySessionInput => ({
+  key: { installSlug: 'install', agentGroupId: group, sessionId: `s-${group}` },
+  runtimeIdentity: `install/${group}/s-${group}`,
+  groupName: group,
+  containerName: 'fixture-agent',
+  capabilities: {} as never,
+});
 const input = (sessionId: string): GatewaySessionInput => ({
   key: { installSlug: 'install', agentGroupId: 'g1', sessionId },
   runtimeIdentity: `install/g1/${sessionId}`,
@@ -307,27 +314,74 @@ describe('OneCLI gateway package', () => {
     expect(attached(gateway)).toEqual(['sec-model']);
   });
 
-  it("ignores OneCLI's own default agent, which a fresh gateway creates with no grants", async () => {
+  it("does not count OneCLI's own default agent when other agents hold secrets", async () => {
     const gateway = fakeGateway({
       others: [
-        { id: 'oc-default', secrets: [], isDefault: true },
+        { id: 'oc-default', secrets: ['sec-model'], isDefault: true },
         { id: 'oc-a', secrets: ['sec-model', 'sec-vercel'] },
       ],
     });
     await expect(grant(gateway)).resolves.toBe(2);
     expect(attached(gateway)).toEqual(['sec-model', 'sec-vercel']);
-    expect(gateway.calls).not.toContain('GET /v1/agents/oc-default/grants');
   });
 
-  it('attaches nothing when another agent deliberately holds no secrets', async () => {
+  it('does not count an agent that holds no secrets', async () => {
     const gateway = fakeGateway({
       others: [
         { id: 'oc-a', secrets: ['sec-model', 'sec-vercel'] },
         { id: 'oc-empty', secrets: [] },
       ],
     });
-    await expect(grant(gateway)).resolves.toBe(0);
-    expect(attached(gateway)).toEqual([]);
+    await expect(grant(gateway)).resolves.toBe(2);
+    expect(attached(gateway)).toEqual(['sec-model', 'sec-vercel']);
+  });
+
+  it("with no other agent holding secrets, uses the default agent's secrets (the post-conversion case)", async () => {
+    const gateway = fakeGateway({
+      others: [
+        { id: 'oc-default', secrets: ['sec-model', 'sec-gone'], isDefault: true },
+        { id: 'oc-empty', secrets: [] },
+      ],
+    });
+    await expect(grant(gateway)).resolves.toBe(1);
+    expect(attached(gateway)).toEqual(['sec-model']);
+  });
+
+  it('on a fresh gateway (default agent empty, no other agent) attaches every vault secret', async () => {
+    const gateway = fakeGateway({ others: [{ id: 'oc-default', secrets: [], isDefault: true }] });
+    await expect(grant(gateway)).resolves.toBe(2);
+    expect(attached(gateway)).toEqual(['sec-model', 'sec-vercel']);
+  });
+
+  it('two different new groups spawning at once, then a third, all get the pre-existing shared set', async () => {
+    const world = statefulGateway({
+      vault: ['sec-model', 'sec-vercel', 'sec-dial'],
+      agents: [
+        { identifier: 'default', isDefault: true, secrets: [] },
+        { identifier: 'n1', secrets: ['sec-model', 'sec-vercel'] },
+      ],
+      putDelayMs: 15,
+    });
+    sdk.ensureAgent.mockImplementation(world.ensureAgent);
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(world.fetch);
+    const controllers: AbortController[] = [];
+    const spawn = (group: string) => {
+      const c = new AbortController();
+      controllers.push(c);
+      return provider.sessions.ensure(groupInput(group), c.signal);
+    };
+    try {
+      // p2 starts while p1 holds only part of its grants.
+      const first = spawn('p1');
+      await world.firstPut;
+      await Promise.all([first, spawn('p2')]);
+      await spawn('n3');
+      for (const group of ['p1', 'p2', 'n3']) expect(world.held(group)).toEqual(['sec-model', 'sec-vercel']);
+    } finally {
+      controllers.forEach((c) => c.abort());
+      fetchMock.mockRestore();
+      sdk.ensureAgent.mockImplementation(async (_input: { name: string; identifier: string }) => ({ created: false }));
+    }
   });
 
   it("fails and deletes the new agent when another agent's grants cannot be read", async () => {
@@ -578,5 +632,54 @@ function fakeGateway(
     get auth() {
       return auth;
     },
+  };
+}
+
+/** A gateway whose agents and grants change as the adapter creates, attaches and deletes. */
+function statefulGateway(opts: {
+  vault: string[];
+  agents: Array<{ identifier: string; secrets: string[]; isDefault?: boolean }>;
+  putDelayMs?: number;
+}) {
+  const agents = new Map(
+    opts.agents.map((a) => [`oc-${a.identifier}`, { ...a, id: `oc-${a.identifier}`, secrets: new Set(a.secrets) }]),
+  );
+  let putApplied: () => void = () => {};
+  const firstPut = new Promise<void>((resolve) => (putApplied = resolve));
+  const json = (body: unknown, status = 200) =>
+    new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
+  const fetchImpl = (async (url: string | URL | Request, init?: RequestInit) => {
+    const { pathname } = new URL(String(url));
+    const method = init?.method ?? 'GET';
+    if (pathname === '/v1/agents' && method === 'GET')
+      return json([...agents.values()].map((a) => ({ id: a.id, identifier: a.identifier, isDefault: !!a.isDefault })));
+    if (pathname === '/v1/secrets') return json(opts.vault.map((id) => ({ id })));
+    const m = /^\/v1\/agents\/([^/]+)(\/grants(?:\/secrets\/([^/]+))?)?$/.exec(pathname);
+    const agent = m ? agents.get(decodeURIComponent(m[1])) : undefined;
+    if (!agent) return json({ error: { message: 'Agent not found.', type: 'not_found_error' } }, 404);
+    if (m![2] && !m![3] && method === 'GET')
+      return json({ mode: 'grants', connections: [], secrets: [...agent.secrets].map((secretId) => ({ secretId })) });
+    if (m![3] && method === 'PUT') {
+      if (opts.putDelayMs) await new Promise((r) => setTimeout(r, opts.putDelayMs));
+      agent.secrets.add(decodeURIComponent(m![3]));
+      putApplied();
+      return json({});
+    }
+    if (!m![2] && method === 'DELETE') {
+      agents.delete(agent.id);
+      return new Response(null, { status: 204 });
+    }
+    return json({ error: 'unexpected' }, 500);
+  }) as typeof fetch;
+  return {
+    fetch: fetchImpl,
+    firstPut,
+    ensureAgent: async ({ identifier }: { identifier: string }) => {
+      const id = `oc-${identifier}`;
+      if (agents.has(id)) return { created: false };
+      agents.set(id, { identifier, id, secrets: new Set<string>() });
+      return { created: true };
+    },
+    held: (identifier: string) => [...(agents.get(`oc-${identifier}`)?.secrets ?? [])].sort(),
   };
 }
