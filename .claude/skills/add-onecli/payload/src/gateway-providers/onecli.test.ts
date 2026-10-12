@@ -54,7 +54,7 @@ vi.mock('../env.js', () => ({
   }),
 }));
 
-import { contributionFromConfig, withProviderEnv } from './onecli.js';
+import { contributionFromConfig, grantProjectSecretsToNewAgent, withProviderEnv } from './onecli.js';
 import { getGatewayProviderRegistration } from './gateway-provider-registry.js';
 
 const provider = getGatewayProviderRegistration('onecli')!;
@@ -242,6 +242,63 @@ describe('OneCLI gateway package', () => {
     controller.abort();
   });
 
+  it('leaves an existing agent alone: no grants are read or written', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch');
+    const controller = new AbortController();
+    try {
+      await provider.sessions.ensure(input('s1'), controller.signal);
+      expect(fetchMock).not.toHaveBeenCalled();
+    } finally {
+      controller.abort();
+      fetchMock.mockRestore();
+    }
+  });
+
+  it('grants every project secret to an agent it just created (the pre-1.44 default)', async () => {
+    sdk.ensureAgent.mockResolvedValueOnce({ created: true });
+    const gateway = fakeGateway();
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(gateway.fetch);
+    const controller = new AbortController();
+    try {
+      await provider.sessions.ensure(input('s1'), controller.signal);
+      expect(gateway.calls).toEqual([
+        'GET /v1/agents',
+        'GET /v1/agents/oc-g1/grants',
+        'GET /v1/secrets',
+        'PUT /v1/agents/oc-g1/grants/secrets/sec-model',
+        'PUT /v1/agents/oc-g1/grants/secrets/sec-vercel',
+      ]);
+      expect(gateway.auth).toBe('Bearer unused');
+      expect(sdk.getContainerConfig).toHaveBeenCalledWith({ agent: 'g1' });
+    } finally {
+      controller.abort();
+      fetchMock.mockRestore();
+    }
+  });
+
+  it('attaches nothing on a gateway without the grants API, where a new agent is already in all mode', async () => {
+    const gateway = fakeGateway({ grantsStatus: 404 });
+    await expect(
+      grantProjectSecretsToNewAgent('g1', { baseUrl: 'http://gw.test/', fetchImpl: gateway.fetch }),
+    ).resolves.toBeNull();
+    expect(gateway.calls).toEqual(['GET /v1/agents', 'GET /v1/agents/oc-g1/grants']);
+  });
+
+  it('deletes the new agent and fails the spawn when a grant cannot be written', async () => {
+    const gateway = fakeGateway({ putStatus: 500 });
+    await expect(
+      grantProjectSecretsToNewAgent('g1', { baseUrl: 'http://gw.test', fetchImpl: gateway.fetch }),
+    ).rejects.toThrow(/the agent was deleted, so the next spawn creates it and retries/);
+    expect(gateway.calls.at(-1)).toBe('DELETE /v1/agents/oc-g1');
+  });
+
+  it('names the manual cleanup when the new agent cannot be deleted either', async () => {
+    const gateway = fakeGateway({ putStatus: 500, deleteStatus: 500 });
+    await expect(
+      grantProjectSecretsToNewAgent('g1', { baseUrl: 'http://gw.test', fetchImpl: gateway.fetch }),
+    ).rejects.toThrow('onecli agents delete --id oc-g1');
+  });
+
   it('shares one health monitor across live leases and reports failure to each session', async () => {
     vi.useFakeTimers();
     const fetchMock = vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('offline'));
@@ -343,3 +400,29 @@ it.each(compatibilityFixtures)('preserves native OneCLI approval content: $name'
   controller.abort();
   await subscription;
 });
+
+function fakeGateway(opts: { grantsStatus?: number; putStatus?: number; deleteStatus?: number } = {}) {
+  const calls: string[] = [];
+  let auth: string | undefined;
+  const json = (body: unknown, status = 200) =>
+    new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
+  const fetchImpl = (async (url: string | URL | Request, init?: RequestInit) => {
+    const { pathname } = new URL(String(url));
+    const method = init?.method ?? 'GET';
+    auth = (init?.headers as Record<string, string> | undefined)?.Authorization;
+    calls.push(`${method} ${pathname}`);
+    if (pathname === '/v1/agents') return json([{ id: 'oc-g1', identifier: 'g1' }]);
+    if (pathname === '/v1/agents/oc-g1/grants') return json({ mode: 'grants', secrets: [] }, opts.grantsStatus);
+    if (pathname === '/v1/secrets') return json([{ id: 'sec-model' }, { id: 'sec-vercel' }]);
+    if (method === 'PUT') return json({}, opts.putStatus);
+    if (method === 'DELETE') return new Response(null, { status: opts.deleteStatus ?? 204 });
+    return json({ error: 'unexpected' }, 500);
+  }) as typeof fetch;
+  return {
+    calls,
+    fetch: fetchImpl,
+    get auth() {
+      return auth;
+    },
+  };
+}

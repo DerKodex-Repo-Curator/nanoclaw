@@ -118,10 +118,95 @@ function monitorLease(signal: AbortSignal): Pick<GatewaySessionLease, 'onUnavail
   };
 }
 
+export interface NewAgentGrantOptions {
+  baseUrl: string;
+  apiKey?: string;
+  projectId?: string | null;
+  fetchImpl?: typeof fetch;
+}
+
+/**
+ * Give a OneCLI agent NanoClaw just created the credentials a new agent had
+ * before OneCLI 1.44: every secret in the project.
+ *
+ * Up to 1.43 a new agent started in `all` secret mode and the gateway injected
+ * every matching vault secret. From 1.44 an agent holds only explicit grants and
+ * a new one starts with none, so without this a new agent group gets no
+ * credentials at all, including the model key setup stored. This runs only for
+ * an agent created by this call; an existing agent's grants are never touched.
+ *
+ * On a gateway without the grants API (404, 1.43 and older) a new agent is
+ * already in `all` mode, so nothing is attached. Any other failure deletes the
+ * agent just created and throws: the spawn fails, and the next spawn creates it
+ * again and retries, instead of leaving an agent with only some of the grants.
+ * Returns the number of secrets attached, or null on a gateway without grants.
+ */
+export async function grantProjectSecretsToNewAgent(
+  identifier: string,
+  opts: NewAgentGrantOptions,
+): Promise<number | null> {
+  const doFetch = opts.fetchImpl ?? fetch;
+  const base = opts.baseUrl.replace(/\/+$/, '');
+  const headers: Record<string, string> = {};
+  if (opts.apiKey) headers.Authorization = `Bearer ${opts.apiKey}`;
+  if (opts.projectId) headers['X-Project-Id'] = opts.projectId;
+  const request = (path: string, method = 'GET') =>
+    doFetch(`${base}${path}`, { method, headers, signal: AbortSignal.timeout(10_000) });
+  const list = async (path: string): Promise<Array<Record<string, unknown>>> => {
+    const res = await request(path);
+    if (!res.ok) throw new Error(`GET ${path} returned ${res.status}`);
+    const body = (await res.json()) as unknown;
+    const rows = Array.isArray(body) ? body : (body as { data?: unknown }).data;
+    if (!Array.isArray(rows)) throw new Error(`GET ${path} did not return a list`);
+    return rows as Array<Record<string, unknown>>;
+  };
+
+  const agent = (await list('/v1/agents')).find((a) => a.identifier === identifier);
+  if (typeof agent?.id !== 'string') throw new Error(`OneCLI agent ${identifier} not found after creating it`);
+  const agentPath = `/v1/agents/${encodeURIComponent(agent.id)}`;
+  try {
+    const grants = await request(`${agentPath}/grants`);
+    if (grants.status === 404) return null;
+    if (!grants.ok) throw new Error(`GET ${agentPath}/grants returned ${grants.status}`);
+    const secrets = await list('/v1/secrets');
+    for (const secret of secrets) {
+      if (typeof secret.id !== 'string') throw new Error('a OneCLI secret has no id');
+      const res = await request(`${agentPath}/grants/secrets/${encodeURIComponent(secret.id)}`, 'PUT');
+      if (!res.ok) throw new Error(`attaching secret ${secret.id} returned ${res.status}`);
+    }
+    return secrets.length;
+  } catch (err) {
+    const removed = await request(agentPath, 'DELETE').then(
+      (res) => res.ok,
+      () => false,
+    );
+    throw new Error(
+      `OneCLI: could not grant the project's secrets to new agent ${identifier} (${(err as Error).message}); ` +
+        (removed
+          ? 'the agent was deleted, so the next spawn creates it and retries'
+          : `deleting it also failed: run \`onecli agents delete --id ${agent.id}\` before the next spawn`),
+      { cause: err },
+    );
+  }
+}
+
 async function ensureSession(input: GatewaySessionInput, signal: AbortSignal): Promise<GatewaySessionLease> {
   // The OneCLI agent identifier is always the agent group id — stable across
   // sessions and reversible via getAgentGroup() for approval routing.
-  await onecli.ensureAgent({ name: input.groupName, identifier: input.key.agentGroupId });
+  const agent = await onecli.ensureAgent({ name: input.groupName, identifier: input.key.agentGroupId });
+  if (agent.created) {
+    const attached = await grantProjectSecretsToNewAgent(input.key.agentGroupId, {
+      baseUrl: onecliUrl || 'https://api.onecli.sh',
+      apiKey: onecliApiKey,
+      projectId: process.env.ONECLI_PROJECT_ID,
+    });
+    if (attached !== null) {
+      log.info('OneCLI agent created with the project secrets granted', {
+        agentGroupId: input.key.agentGroupId,
+        secrets: attached,
+      });
+    }
+  }
   const config = await onecli.getContainerConfig({ agent: input.key.agentGroupId });
   log.info('OneCLI gateway applied', { agentGroupId: input.key.agentGroupId, sessionId: input.key.sessionId });
   return {
