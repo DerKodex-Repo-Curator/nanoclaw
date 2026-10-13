@@ -102,10 +102,17 @@ source "$PROJECT_ROOT/setup/lib/release-checkout.sh"
 REQUESTED_CHANNEL="${NANOCLAW_UPDATE_CHANNEL:-}"
 _release_args=()
 _take_channel=false
+_past_options=false
 for arg in "$@"; do
-  if [ "$_take_channel" = true ]; then
+  # After `--` setup treats everything as positional, so this must too.
+  if [ "$_past_options" = true ]; then
+    _release_args+=("$arg")
+  elif [ "$_take_channel" = true ]; then
     REQUESTED_CHANNEL="$arg"
     _take_channel=false
+  elif [ "$arg" = "--" ]; then
+    _past_options=true
+    _release_args+=("$arg")
   elif [ "$arg" = "--update-channel" ]; then
     _take_channel=true
   elif [ "${arg#--update-channel=}" != "$arg" ]; then
@@ -118,7 +125,7 @@ if [ "$_take_channel" = true ]; then
   echo "error: Missing value for --update-channel"
   exit 1
 fi
-unset _take_channel
+unset _take_channel _past_options
 
 RELEASE_TTY=0
 if [ -t 0 ] && [ -t 1 ]; then RELEASE_TTY=1; fi

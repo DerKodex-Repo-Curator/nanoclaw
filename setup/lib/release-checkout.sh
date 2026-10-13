@@ -16,17 +16,35 @@ release_checkout_saved_channel() {
     | tail -1 | cut -d= -f2- | tr -d "\"'[:space:]" | tr 'A-Z' 'a-z'
 }
 
+# release_checkout_official_head <root> — true when HEAD is on a branch of the
+# official repository (same URL rule as channels-remote.sh).
+release_checkout_official_head() {
+  local root=$1 remote url
+  for remote in $(git -C "$root" remote 2>/dev/null); do
+    url=$(git -C "$root" config --get "remote.$remote.url" 2>/dev/null || true)
+    case "${url%.git}" in
+      *qwibitai/nanoclaw|*nanocoai/nanoclaw)
+        if [ -n "$(git -C "$root" for-each-ref --count=1 --contains HEAD "refs/remotes/$remote" 2>/dev/null)" ]; then
+          return 0
+        fi
+        ;;
+    esac
+  done
+  return 1
+}
+
 # release_checkout_decide <root> <requested-channel> <tty: 1|0>
 #
 # Prints one line:
 #   none           leave the checkout alone and say nothing
 #   offer <tag>    ask: latest release or newest code from main
 #   switch <tag>   the channel was given explicitly, switch without asking
-#   notice <tag>   cannot ask (no terminal): keep the checkout, print a hint
+#   notice <tag>   no terminal, a fork, or a choice the release cannot save:
+#                  keep the checkout, print a hint
 #   invalid <raw>  the requested channel is not stable, beta or edge
 release_checkout_decide() {
   local root=$1 requested tty=${3:-0} channel tag
-  requested=$(printf '%s' "${2:-}" | tr -d '[:space:]' | tr 'A-Z' 'a-z')
+  requested=$(printf '%s' "${2:-}" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | tr 'A-Z' 'a-z')
 
   case "$requested" in
     ''|stable|beta|edge) ;;
@@ -53,6 +71,12 @@ release_checkout_decide() {
   [ "$(git -C "$root" rev-list --count "$tag..HEAD" 2>/dev/null)" != 0 ] || { echo none; return 0; }
 
   if [ "$tty" != 1 ]; then echo "notice $tag"; return 0; fi
+  # A fork's main may carry its owner's changes, which the release would drop.
+  release_checkout_official_head "$root" || { echo "notice $tag"; return 0; }
+  # A release from before this setting cannot save beta; stable needs no saving.
+  if [ "$requested" = beta ] && ! git -C "$root" cat-file -e "$tag:setup/lib/release-checkout.sh" 2>/dev/null; then
+    echo "notice $tag"; return 0
+  fi
   if [ -n "$requested" ]; then echo "switch $tag"; return 0; fi
   echo "offer $tag"
 }

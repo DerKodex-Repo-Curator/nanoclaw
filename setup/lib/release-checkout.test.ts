@@ -11,6 +11,7 @@ import { commitSetupChanges, snapshotTree } from './setup-commit.js';
 
 const HELPER = path.join(process.cwd(), 'setup/lib/release-checkout.sh');
 const GIT_ENV = { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' };
+const OFFICIAL_URL = 'https://github.com/nanocoai/nanoclaw.git';
 const roots: string[] = [];
 
 afterEach(() => {
@@ -57,7 +58,7 @@ const decide = (root: string, requested = '', tty = '1') =>
   helper('release_checkout_decide', root, requested, tty).stdout;
 
 /** A fresh clone of a repo whose main is one commit past v2.4.0 (or exactly on it). */
-function freshClone(options: { ahead?: boolean } = {}) {
+function freshClone(options: { ahead?: boolean; official?: boolean } = {}) {
   const seed = temp('release-seed-');
   git(seed, ['init', '-q', '-b', 'main']);
   fs.writeFileSync(path.join(seed, '.gitignore'), 'data/\n.env\nlogs/\n');
@@ -74,7 +75,14 @@ function freshClone(options: { ahead?: boolean } = {}) {
   }
   const install = path.join(temp('release-install-'), 'nanoclaw');
   git(path.dirname(install), ['clone', '-q', seed, install]);
+  if (options.official ?? true) markOfficial(install, seed);
   return { seed, install, release };
+}
+
+/** Name the official repository as origin while Git keeps fetching from the local seed. */
+function markOfficial(install: string, seed: string): void {
+  git(install, ['config', `url.${seed}.insteadOf`, OFFICIAL_URL]);
+  git(install, ['config', 'remote.origin.url', OFFICIAL_URL]);
 }
 
 describe('release checkout decision', () => {
@@ -84,9 +92,30 @@ describe('release checkout decision', () => {
 
   it('switches without asking when the channel was given, and only on a terminal', () => {
     const { install } = freshClone();
-    expect(decide(install, 'stable')).toBe('switch v2.4.0');
-    expect(decide(install, ' Beta ')).toBe('switch v2.4.0');
+    expect(decide(install, ' Stable ')).toBe('switch v2.4.0');
     expect(decide(install, 'stable', '0')).toBe('notice v2.4.0');
+  });
+
+  it('keeps main for beta when the release cannot save that choice', () => {
+    expect(decide(freshClone().install, 'beta')).toBe('notice v2.4.0');
+
+    const { seed } = freshClone();
+    git(seed, ['checkout', '-q', '-B', 'main', 'v2.4.0']);
+    fs.mkdirSync(path.join(seed, 'setup/lib'), { recursive: true });
+    fs.writeFileSync(path.join(seed, 'setup/lib/release-checkout.sh'), '');
+    commit(seed, 'v2.6.0');
+    git(seed, ['tag', '-a', 'v2.6.0', '-m', 'v2.6.0']);
+    commit(seed, 'main tip');
+    const install = path.join(temp('release-install-'), 'nanoclaw');
+    git(path.dirname(install), ['clone', '-q', seed, install]);
+    markOfficial(install, seed);
+    expect(decide(install, 'beta')).toBe('switch v2.6.0');
+  });
+
+  it("never moves a fork, whose main may carry its owner's changes", () => {
+    const { install } = freshClone({ official: false });
+    expect(decide(install)).toBe('notice v2.4.0');
+    expect(decide(install, 'stable')).toBe('notice v2.4.0');
   });
 
   it('never offers without a terminal', () => {
@@ -151,6 +180,7 @@ describe('release checkout decision', () => {
 
   it('reports an unknown channel instead of guessing', () => {
     expect(decide(freshClone().install, 'nightly')).toBe('invalid nightly');
+    expect(decide(freshClone().install, 'sta ble')).toBe('invalid sta ble');
   });
 });
 
@@ -265,6 +295,13 @@ describe.skipIf(process.getuid?.() === 0)('nanoclaw.sh without a terminal', () =
     expect(result.stdout).not.toContain('latest release');
     expect(result.stdout).toContain('HANDOFF args=[--silent run setup:auto] channel=[edge]');
     onMain(install, head);
+  });
+
+  it('ignores a channel after the end-of-options marker, like setup does', () => {
+    const { run } = entrypointClone();
+    const result = run(['--', '--update-channel', 'nightly']);
+    expect(result.status).toBe(0);
+    expect(result.stdout).toContain('HANDOFF args=[--silent run setup:auto -- --update-channel nightly] channel=[]');
   });
 
   it('stops on an unknown channel before installing anything', () => {
