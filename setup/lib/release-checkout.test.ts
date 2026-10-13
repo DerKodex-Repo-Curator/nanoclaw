@@ -116,6 +116,10 @@ describe('release checkout decision', () => {
     const { install } = freshClone({ official: false });
     expect(decide(install)).toBe('notice v2.4.0');
     expect(decide(install, 'stable')).toBe('notice v2.4.0');
+
+    const lookalike = freshClone({ official: false }).install;
+    git(lookalike, ['config', 'remote.origin.url', 'https://github.com/notnanocoai/nanoclaw.git']);
+    expect(decide(lookalike, 'stable')).toBe('notice v2.4.0');
   });
 
   it('never offers without a terminal', () => {
@@ -132,7 +136,8 @@ describe('release checkout decision', () => {
     expect(decide(install, 'edge')).toBe('none');
     fs.writeFileSync(path.join(install, '.env'), 'OTHER=1\nNANOCLAW_UPDATE_CHANNEL="edge"\n');
     expect(decide(install)).toBe('none');
-    expect(decide(install, 'stable')).toBe('switch v2.4.0');
+    // v2.4.0 predates the setting and could not replace the saved edge.
+    expect(decide(install, 'stable')).toBe('notice v2.4.0');
   });
 
   it('ignores a .env without the channel', () => {

@@ -23,7 +23,7 @@ release_checkout_official_head() {
   for remote in $(git -C "$root" remote 2>/dev/null); do
     url=$(git -C "$root" config --get "remote.$remote.url" 2>/dev/null || true)
     case "${url%.git}" in
-      *qwibitai/nanoclaw|*nanocoai/nanoclaw)
+      *[:/]qwibitai/nanoclaw|*[:/]nanocoai/nanoclaw)
         if [ -n "$(git -C "$root" for-each-ref --count=1 --contains HEAD "refs/remotes/$remote" 2>/dev/null)" ]; then
           return 0
         fi
@@ -43,7 +43,7 @@ release_checkout_official_head() {
 #                  keep the checkout, print a hint
 #   invalid <raw>  the requested channel is not stable, beta or edge
 release_checkout_decide() {
-  local root=$1 requested tty=${3:-0} channel tag
+  local root=$1 requested tty=${3:-0} channel tag saved
   requested=$(printf '%s' "${2:-}" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | tr 'A-Z' 'a-z')
 
   case "$requested" in
@@ -73,8 +73,11 @@ release_checkout_decide() {
   if [ "$tty" != 1 ]; then echo "notice $tag"; return 0; fi
   # A fork's main may carry its owner's changes, which the release would drop.
   release_checkout_official_head "$root" || { echo "notice $tag"; return 0; }
-  # A release from before this setting cannot save beta; stable needs no saving.
-  if [ "$requested" = beta ] && ! git -C "$root" cat-file -e "$tag:setup/lib/release-checkout.sh" 2>/dev/null; then
+  # A release from before this setting cannot save the choice, so only a
+  # choice that is already in effect may switch to it.
+  saved=$(release_checkout_saved_channel "$root")
+  if [ -n "$requested" ] && [ "$requested" != "${saved:-stable}" ] \
+    && ! git -C "$root" cat-file -e "$tag:setup/lib/release-checkout.sh" 2>/dev/null; then
     echo "notice $tag"; return 0
   fi
   if [ -n "$requested" ]; then echo "switch $tag"; return 0; fi
