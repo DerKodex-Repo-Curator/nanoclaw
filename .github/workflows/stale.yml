@@ -26,32 +26,28 @@
 #   - add triage/keep                  -> permanent exemption, no argument
 #
 # ---------------------------------------------------------------------------
-# DRY RUN. debug-only is true. ARMING IS DUE 2026-09-12.
+# DRY RUN. debug-only is true. Arm no sooner than two weeks after merge.
 #
-# Until that date this workflow performs NO writes. It logs what it would have
-# marked and closed and stops there: no labels, no comments, no closes, no
-# notifications to anyone. The two weeks exist so a mis-scoped label filter is
-# caught by reading a log rather than by several hundred contributors reading a
-# bot comment.
+# While debug-only is true this workflow performs NO writes. It logs what it
+# would have marked and closed and stops there: no labels, no comments, no
+# closes, no notifications to anyone. The two weeks exist so a mis-scoped label
+# filter is caught by reading a log rather than by several hundred contributors
+# reading a bot comment.
 #
 # Flipping debug-only to false is the arming step and it is not reversible for
-# anything already sent. Before flipping, on 2026-09-12 or later:
+# anything already sent. Before flipping:
 #   1. Read the most recent run's log and confirm every item it lists is
 #      genuinely author-blocked.
-#   2. Confirm the "stale" label exists on the repo. It does not today; GitHub
-#      would auto-create it with a default colour on the first armed run, which
-#      is not how the rest of this taxonomy was made.
-#   3. Confirm triage/keep is on anything a maintainer wants frozen, so the
+#   2. Confirm triage/keep is on anything a maintainer wants frozen, so the
 #      escape hatch is in place on day one rather than after the first
 #      complaint.
-# Day-1 blast radius when this shipped was zero items, because neither trigger
-# label was applied to anything yet. Volume can only grow as fast as triage
-# applies those labels, which is to say never faster than a human reading the
-# item first.
+# Volume can only grow as fast as triage applies the two trigger labels, which
+# is to say never faster than a human reading the item first.
 # ---------------------------------------------------------------------------
 #
-# Lane B (a slow, forward-dated general-inactivity lane) is deliberately not
-# here. It is a separate decision and a separate change.
+# There is deliberately no general-inactivity lane. Most idle items are waiting
+# on us, not on their authors, so a bot must not close them for our silence.
+# Backlog cleanup is a human batch close under CONTRIBUTING.md.
 
 name: Stale
 
@@ -62,15 +58,14 @@ on:
 
 jobs:
   stale:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     permissions:
       issues: write
       pull-requests: write
     steps:
-      # actions/stale v11.0.0, pinned to the commit the tag resolves to.
-      - uses: actions/stale@4391f3da665fdf50b6810c1a66712fb9ba21aa93
+      - uses: actions/stale@4391f3da665fdf50b6810c1a66712fb9ba21aa93 # v11.0.0
         with:
-          # DRY RUN. See the arming note above. Due 2026-09-12.
+          # DRY RUN. See the arming note above.
           debug-only: true
 
           # The population. Nothing outside these two label sets is examined.
@@ -135,8 +130,7 @@ jobs:
             **Closing this for now.** Nothing came back on the request above, so we are closing to
             keep the review queue matched to what is actually moving. This is not a rejection and
             it is not permanent. Reopen this PR whenever you pick it back up, or open a fresh one
-            against current `main`. Either way it gets a first response within 7 days, like any new
-            contribution. Thank you for the work you put into it.
+            against current `main`. Thank you for the work you put into it.
 
           stale-issue-message: >-
             **We still need a reproduction before this can move.** We asked above and have not heard
