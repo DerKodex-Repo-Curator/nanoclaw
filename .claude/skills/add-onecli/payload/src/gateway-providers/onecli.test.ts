@@ -269,7 +269,11 @@ describe('OneCLI gateway package', () => {
     const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(gateway.fetch);
     sdk.getContainerConfig.mockImplementationOnce(async () => {
       gateway.calls.push('container-config');
-      return { env: {}, caCertificate: 'fixture-ca', caCertificateContainerPath: '/tmp/onecli-ca.pem' };
+      return {
+        env: { HTTPS_PROXY: 'http://host.docker.internal:15001' },
+        caCertificate: 'fixture-ca',
+        caCertificateContainerPath: '/tmp/onecli-ca.pem',
+      };
     });
     const controller = new AbortController();
     try {
