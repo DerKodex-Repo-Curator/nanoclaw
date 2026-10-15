@@ -1,25 +1,33 @@
 # Stale policy, lane A: author-blocked items only.
 #
-# This workflow never examines the backlog at large. It looks at exactly two
-# populations, both of which mean a human already read the item and asked its
-# author for something:
+# This workflow never examines the backlog at large. It looks only at items a
+# human already read before asking the author for something:
 #
-#   issues  carrying  triage/needs-repro   (we asked for a reproduction)
-#   PRs     carrying  triage/needs-author  (a maintainer requested changes)
+#   issues  carrying  triage/needs-repro or triage/needs-author
+#   PRs     carrying  triage/needs-author
 #
 # Everything else is invisible to it. An item waiting on us for review, for
 # triage, or for a decision is never marked and never closed, because the
 # absence of those labels is what "the ball is ours" looks like in this repo.
 # The rule the policy is built on: a bot may close an item only when the ball
 # is demonstrably in the author's court, and only after the bot said so out
-# loud and gave a deadline.
+# loud and gave a deadline. Apply a triage label only together with a comment
+# that says what is needed; the bot's messages point to "the request above".
 #
-# Timings: 21 days of silence marks an item stale. A stale issue closes 14 days
-# later (35 total), a stale PR 21 days later (42 total). A comment on a stale
-# item removes both `stale` and its triage/* label, so once the author answers
-# the item leaves the population. A push or a review reply alone does not
-# count: the action reads issue comments and events only. Closes use the
+# Timings: 21 days without activity marks an item stale. A stale issue closes
+# 14 days later (35 total), a stale PR 21 days later (42 total). Closes use the
 # not_planned reason, which renders as "not planned" rather than "completed".
+#
+# What counts as activity (actions/stale v11 behaviour):
+#   - Before the mark, any update resets the 21 days: a comment, a push, a
+#     label change.
+#   - After the mark, a comment from a person, or an issue event such as a
+#     label change or a force-push, clears `stale` and also removes the triage
+#     label, so the item leaves the population. A maintainer's own comment
+#     counts too: if the item still waits on the author, re-apply the triage
+#     label after the next run has removed it.
+#   - After the mark, a plain push or a review reply does not clear it. It only
+#     delays the close, and both labels stay on.
 #
 # Escape hatches, in order of how often they should be reached for:
 #   - comment on the item              -> item leaves the population
@@ -33,21 +41,31 @@
 # would have marked and closed and stops there: no labels, no comments, no
 # closes, no notifications to anyone. The two weeks exist so a mis-scoped label
 # filter is caught by reading a log rather than by several hundred contributors
-# reading a bot comment.
+# reading a bot comment. The dry run checks that filter only: it never applies
+# `stale`, so the messages, the un-stale path and the close path first run
+# once armed.
 #
 # Flipping debug-only to false is the arming step and it is not reversible for
 # anything already sent. Before flipping:
 #   1. Read the most recent run's log and confirm every item it would mark or
 #      close is genuinely author-blocked. The log also lists every skipped
-#      open item; those are expected.
-#   2. Confirm triage/keep is on anything a maintainer wants frozen, so the
+#      open item; filter those out with:
+#        gh run view <run-id> --repo nanocoai/nanoclaw --log \
+#          | grep -E 'Marking this|for being stale|now un-stale'
+#   2. List by hand every labelled item already idle for 21+ days. Each one
+#      gets the stale comment on the first armed run.
+#   3. Confirm triage/keep is on anything a maintainer wants frozen, so the
 #      escape hatch is in place on day one rather than after the first
 #      complaint.
-#   3. Make an author reply remove the triage/* label before the item is ever
+#   4. Make an author reply remove the triage/* label before the item is ever
 #      marked. This workflow only clears it after the stale mark, so without
 #      that an author who answered and got no reply from us would be closed.
-# Volume can only grow as fast as triage applies the two trigger labels, which
-# is to say never faster than a human reading the item first.
+# Rollback: gh workflow disable stale.yml --repo nanocoai/nanoclaw stops new
+# runs; gh run cancel <run-id> --repo nanocoai/nanoclaw stops one in progress.
+# Comments already posted stay.
+#
+# Volume can only grow as fast as triage applies the trigger labels, which is
+# to say never faster than a human reading the item first.
 # ---------------------------------------------------------------------------
 #
 # There is deliberately no general-inactivity lane. Most idle items are waiting
@@ -73,8 +91,8 @@ jobs:
           # DRY RUN. See the arming note above.
           debug-only: true
 
-          # The population. Nothing outside these two label sets is examined.
-          any-of-issue-labels: 'triage/needs-repro'
+          # The population. Nothing outside these labels is examined.
+          any-of-issue-labels: 'triage/needs-repro,triage/needs-author'
           any-of-pr-labels: 'triage/needs-author'
 
           days-before-issue-stale: 21
@@ -131,9 +149,9 @@ jobs:
             we have not heard back, so it is now labelled `stale`. Leave a comment at the bottom of
             this page when you push your change, or to tell us you need more time. That removes the
             label automatically; a push or a review reply on its own does not. If nothing arrives
-            in 21 days we will close
-            it, so the open queue stays an honest picture of what is moving. A close here is
-            bookkeeping, not a verdict on your work. Thank you for the contribution.
+            in 21 days we will close it, so the open queue stays an honest picture of what is
+            moving. A close here is bookkeeping, not a verdict on your work. Thank you for the
+            contribution.
 
           close-pr-message: >-
             **Closing this for now.** Nothing came back on the request above, so we are closing to
@@ -142,15 +160,16 @@ jobs:
             for the work you put into it.
 
           stale-issue-message: >-
-            **We still need a reproduction before this can move.** We asked above and have not heard
-            back, so this is now labelled `stale`. Add the steps, your NanoClaw version, and the
-            relevant lines from `logs/nanoclaw.error.log` in a comment. That removes the label
-            automatically. Without a reproduction we will close in 14 days, because we cannot fix
-            behaviour we cannot see. If it closes, you can open a new issue with the details at any
-            time.
+            **This issue is waiting on an answer from you.** A maintainer asked for something above,
+            usually a reproduction or more details, and we have not heard back, so it is now
+            labelled `stale`. Reply in a comment with what was asked. For a bug, that is the steps,
+            your NanoClaw version, and the relevant lines from `logs/nanoclaw.error.log`. A comment
+            removes the label automatically. Without an answer we will close this in 14 days,
+            because we cannot act on what we cannot see. If it closes, you can open a new issue
+            with the details at any time.
 
           close-issue-message: >-
-            **Closing this for now, because we could not reproduce it.** That is a limit on what we
-            can see from here, not a judgment on the report. If you can reproduce it later, open a
-            new issue with steps, a version, and logs, and link this one. Thank you for taking the
-            time to file it.
+            **Closing this for now.** We asked for something above and did not hear back. That is a
+            limit on what we can see from here, not a judgment on the report. If you pick it back
+            up, open a new issue with the details and link this one. Thank you for taking the time
+            to file it.
