@@ -150,9 +150,9 @@ Messages marked delivered with a null `platform_message_id` are not automaticall
 
 A spawned container that exits without writing to `outbound.db` shows up in `logs/nanoclaw.log` as a `Container exited` line with a non-zero `code`, often preceded by streamed `container=<folder>` stderr (at debug level).
 
-**Authentication errors:** secrets are injected per request by the OneCLI gateway — none are passed in env vars or chat context. A `401` from an API whose credential is in the vault usually means that secret was never attached to the agent group's OneCLI agent (a secret stored after the agent was created is not attached automatically):
+**Authentication errors:** secrets are injected per request by the OneCLI gateway — none are passed in env vars or chat context. A `401` from an API whose credential is in the vault usually means that secret is not attached to the agent group's OneCLI agent. NanoClaw attaches only the group's model credential, on each spawn; a tool secret is attached to the groups chosen when the skill that added it ran:
 ```bash
-onecli agents list                                                   # find the agent: identifier = agent group id
+onecli agents list --max 0                                           # find the agent: identifier = agent group id
 onecli agents grants list --id <agent-id>                            # the secrets it holds
 onecli agents grants attach-secret --id <agent-id> --secret-id <id>  # attach the missing one
 ```

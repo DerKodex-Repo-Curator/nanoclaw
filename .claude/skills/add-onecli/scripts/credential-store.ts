@@ -1,4 +1,8 @@
 import { createProviderCredentialConnection } from './provider-credentials.js';
+import {
+  createdSecretId,
+  recordProviderCredentials,
+} from '../payload/src/gateway-providers/onecli-provider-credentials.js';
 import { getProviderModelEndpoint } from '../../../../src/provider-contracts/index.js';
 import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
@@ -35,10 +39,11 @@ export function createCredentialStore(root = process.cwd()): ProviderCredentialS
       check(provider);
       const temporary =
         credential.kind === 'api-key' ? fs.mkdtempSync(path.join(os.tmpdir(), 'onecli-codex-')) : undefined;
+      let output: string;
       try {
         const file = credential.kind === 'oauth' ? credential.file : path.join(temporary!, 'key');
         if (credential.kind === 'api-key') fs.writeFileSync(file, credential.value, { mode: 0o600 });
-        execFileSync(
+        output = execFileSync(
           'onecli',
           [
             'secrets',
@@ -53,13 +58,16 @@ export function createCredentialStore(root = process.cwd()): ProviderCredentialS
             new URL(getProviderModelEndpoint(provider, credential.kind === 'api-key' ? 'api' : 'subscription'))
               .hostname,
           ],
-          { stdio: ['ignore', 'pipe', 'pipe'] },
+          { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] },
         );
       } catch {
         throw new Error('Cannot save Codex credentials in the selected OneCLI vault.');
       } finally {
         if (temporary) fs.rmSync(temporary, { recursive: true, force: true });
       }
+      // New groups get only the recorded model credential; an unparsed id is matched by name at spawn.
+      const id = createdSecretId(output);
+      if (id) recordProviderCredentials(path.join(root, 'data'), provider, [id]);
     },
   };
 }

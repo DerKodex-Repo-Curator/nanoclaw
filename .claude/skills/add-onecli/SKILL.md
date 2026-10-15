@@ -15,6 +15,8 @@ Copy the package's native adapter, tests, and agent guidance into their normal N
 payload/src/gateway-providers/onecli-files.ts -> src/gateway-providers/onecli-files.ts
 payload/src/gateway-providers/onecli-files.test.ts -> src/gateway-providers/onecli-files.test.ts
 payload/src/gateway-providers/onecli.ts -> src/gateway-providers/onecli.ts
+payload/src/gateway-providers/onecli-provider-credentials.ts -> src/gateway-providers/onecli-provider-credentials.ts
+payload/src/gateway-providers/onecli-provider-credentials.test.ts -> src/gateway-providers/onecli-provider-credentials.test.ts
 payload/src/gateway-providers/onecli.test.ts -> src/gateway-providers/onecli.test.ts
 payload/src/gateway-providers/onecli-install.test.ts -> src/gateway-providers/onecli-install.test.ts
 payload/container/skills/onecli-gateway/SKILL.md -> container/skills/onecli-gateway/SKILL.md
@@ -50,23 +52,22 @@ pnpm exec tsx .claude/skills/add-onecli/scripts/setup.ts
 
 Provider skills such as `/add-opencode` store model credentials here through the
 gateway seam. An agent group's OneCLI agent holds only the secrets attached to it.
-When NanoClaw creates the agent, on the group's first spawn, it attaches the
-secrets held by every agent that holds any secret. OneCLI's own default agent
-and agents with no secrets are not counted. So a credential attached to every
-agent reaches new groups too; to restrict one, attach it only to chosen agents.
-If only one agent holds secrets, new agents get that agent's whole set.
-With no such agent, the default agent's secrets are used if it has any (true
-right after a 1.44 upgrade). Otherwise, on a fresh gateway, the first NanoClaw
-agent gets every stored credential, including ones attached to no agent: attach
-a restricted credential to its chosen agents before the first spawn, or detach
-it afterwards. A secret stored later is not attached to existing agents: attach
-it to each group that needs it with
-`onecli agents grants attach-secret --id <agent-id> --secret-id <secret-id>`
-(`onecli agents list` maps the group id, shown as `identifier`, to `<agent-id>`).
-Attaching adds one secret and leaves the agent's other grants alone. Verify the
-result with `onecli agents grants list --id <agent-id>`; the gateway can take up
-to a minute to apply a change. Do not put a key in `.env`, command arguments, or
-the container environment.
+NanoClaw records the id of each model credential its provider setup saves (setup's
+Claude key, `/add-codex`, `/add-opencode`) in `data/onecli/provider-credentials.json`,
+by provider. On every spawn it attaches the recorded credentials for the provider
+the group runs, if the agent does not hold them yet; this also covers a new group,
+a group that switched provider, and a login saved after the group existed. An
+install that saved credentials before ids were recorded is matched once by the
+names NanoClaw gives them (`Anthropic`, `Codex`, `OpenCode …`).
+
+Every other secret and every app connection is opt-in: the skill that adds it
+attaches it to the groups you choose, and new groups do not get it. To grant one
+by hand: `onecli agents grants attach-secret --id <agent-id> --secret-id <secret-id>`
+(`onecli agents list --max 0` maps the group id, shown as `identifier`, to
+`<agent-id>`). Attaching adds one secret and leaves the agent's other grants alone;
+`detach-secret` takes it away. Verify with `onecli agents grants list --id <agent-id>`;
+the gateway can take up to a minute to apply a change. Do not put a key in `.env`,
+command arguments, or the container environment.
 
 - Only a selected OneCLI adapter uses `ONECLI_URL` and `ONECLI_API_KEY`.
 - Moving an API key to another exact host keeps its stored value, so a blank
@@ -83,7 +84,7 @@ pnpm run build
 ```
 
 ```nc:run effect:test
-pnpm exec vitest run src/gateway-providers/onecli-files.test.ts src/gateway-providers/onecli-install.test.ts src/gateway-providers/onecli.test.ts src/gateway-providers/gateway-provider-registry.test.ts src/gateway-approval-coordinator.test.ts
+pnpm exec vitest run src/gateway-providers/onecli-files.test.ts src/gateway-providers/onecli-install.test.ts src/gateway-providers/onecli-provider-credentials.test.ts src/gateway-providers/onecli.test.ts src/gateway-providers/gateway-provider-registry.test.ts src/gateway-approval-coordinator.test.ts
 ```
 
 The setup consumer writes `NANOCLAW_GATEWAY_PROVIDER=onecli` only after every directive above succeeds. Claude authentication is then completed through `scripts/auth.ts`; credentials never enter an agent container.

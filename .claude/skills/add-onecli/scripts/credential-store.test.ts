@@ -10,6 +10,8 @@ if (!getProviderHostContract('codex'))
     },
   });
 import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { afterEach, expect, it, vi } from 'vitest';
 const exec = vi.hoisted(() => vi.fn());
 vi.mock('node:child_process', () => ({ execFileSync: exec }));
@@ -33,4 +35,25 @@ it('recognizes existing OpenAI secrets and fails explicitly when the selected va
     throw new Error('fixture-private-error');
   });
   await expect(createCredentialStore().has('codex')).rejects.toThrow('Cannot read the selected OneCLI vault');
+});
+it('records the created Codex secret id so Codex groups are granted it, and only after a successful save', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-record-'));
+  const file = path.join(root, 'data', 'onecli', 'provider-credentials.json');
+  try {
+    exec.mockReturnValueOnce('{\n  "hint": "attach it",\n  "id": "sec-codex"\n}');
+    await createCredentialStore(root).save('codex', { kind: 'api-key', value: 'fixture-key' });
+    expect(JSON.parse(fs.readFileSync(file, 'utf8'))).toEqual({ codex: ['sec-codex'] });
+    fs.rmSync(path.join(root, 'data'), { recursive: true });
+    exec.mockReturnValueOnce('not json');
+    await createCredentialStore(root).save('codex', { kind: 'api-key', value: 'fixture-key' });
+    exec.mockImplementationOnce(() => {
+      throw new Error('fixture-private-error');
+    });
+    await expect(createCredentialStore(root).save('codex', { kind: 'api-key', value: 'k' })).rejects.toThrow(
+      'Cannot save Codex credentials',
+    );
+    expect(fs.existsSync(file)).toBe(false);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 });

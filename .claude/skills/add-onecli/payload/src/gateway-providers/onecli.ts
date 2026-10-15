@@ -4,6 +4,11 @@ import { OneCLI, ApprovalClient, type ContainerConfig, type ApprovalRequest } fr
 
 import { DATA_DIR } from '../config.js';
 import { combinedCaBundle, stageOnecliFile } from './onecli-files.js';
+import {
+  isSavedProviderCredentialName,
+  readProviderCredentials,
+  recordProviderCredentials,
+} from './onecli-provider-credentials.js';
 import { readEnvFile } from '../env.js';
 import { log } from '../log.js';
 
@@ -118,11 +123,12 @@ function monitorLease(signal: AbortSignal): Pick<GatewaySessionLease, 'onUnavail
   };
 }
 
-export interface NewAgentGrantOptions {
+export interface ProviderGrantOptions {
   baseUrl: string;
   apiKey?: string;
   projectId?: string | null;
   fetchImpl?: typeof fetch;
+  dataDir?: string;
 }
 
 async function isUnknownRoute(res: Response): Promise<boolean> {
@@ -135,43 +141,26 @@ async function isUnknownRoute(res: Response): Promise<boolean> {
 }
 
 /**
- * Give a OneCLI agent NanoClaw just created the credentials that every agent
- * holding any secret holds: the intersection of their secret grants, limited to
- * secrets that still exist.
+ * Make sure an agent group's OneCLI agent holds the model credential for the
+ * provider it runs: the secrets this install recorded when that provider's
+ * login saved them. From 1.44 an agent receives only the secrets attached to
+ * it and a new one starts with none. Tool secrets and app connections are
+ * never attached here; the skill that adds one attaches it to chosen groups.
  *
- * Up to 1.43 a new agent started in `all` secret mode and the gateway injected
- * every matching vault secret. From 1.44 an agent holds only explicit grants and
- * a new one starts with none, so without this a new agent group gets no
- * credentials at all, including the model key setup stored. Grants are the
- * marker: a credential every agent has (the model key, Vercel) is universal and
- * a new agent gets it; one attached only to chosen agents (a Dial key a skill
- * scoped) is not. Right after the 1.44 conversion every former `all` agent
- * holds every secret, so the intersection is every secret, the old behavior.
- * App connections are not considered or attached.
- *
- * Counted agents: every agent except the new one, OneCLI's own default agent
- * (`isDefault`, which NanoClaw never uses), and agents holding no secret. An
- * empty agent (one being set up right now, one left behind by a failed setup,
- * or another app's) narrows nothing; otherwise one such agent would leave every
- * later agent with nothing too. With no counted agent, the default agent's
- * secrets are used if it holds any (after the 1.44 conversion it holds every
- * secret that existed); on a fresh gateway, every secret in the vault, including
- * ones attached to no agent. If any grants read fails, the step fails rather
- * than guessing.
- *
- * This runs only for an agent created by this call; an existing agent's grants
- * are never touched. On a gateway without the grants API (1.43 and older) a new
- * agent is already in `all` mode, so nothing is attached. Any other failure
- * deletes the agent just created and throws: the spawn fails, and the next
- * spawn creates it again and retries, instead of leaving an agent with only some
- * of the grants. Returns the number of secrets attached, or null on a gateway
- * without grants.
+ * Runs on every spawn and only adds missing grants, so an interrupted first
+ * setup, a provider switch, or a login saved after the group existed is
+ * repaired on the next spawn. A gateway without the grants API (1.43 and
+ * older) keeps its `all` mode, so nothing is attached. Any failure throws and
+ * the spawn fails; nothing is deleted. Returns the ids attached, or null on a
+ * gateway without grants.
  */
-export async function grantSharedSecretsToNewAgent(
+export async function grantProviderCredentials(
   identifier: string,
-  opts: NewAgentGrantOptions,
-): Promise<number | null> {
+  provider: string,
+  opts: ProviderGrantOptions,
+): Promise<string[] | null> {
   const doFetch = opts.fetchImpl ?? fetch;
+  const dataDir = opts.dataDir ?? DATA_DIR;
   const base = opts.baseUrl.replace(/\/+$/, '');
   const headers: Record<string, string> = {};
   if (opts.apiKey) headers.Authorization = `Bearer ${opts.apiKey}`;
@@ -186,105 +175,75 @@ export async function grantSharedSecretsToNewAgent(
     if (!Array.isArray(rows)) throw new Error(`GET ${path} did not return a list`);
     return rows as Array<Record<string, unknown>>;
   };
-  const grantedSecretIds = async (agentId: string): Promise<Set<string>> => {
-    const path = `/v1/agents/${encodeURIComponent(agentId)}/grants`;
-    const res = await request(path);
-    if (!res.ok) throw new Error(`GET ${path} returned ${res.status}`);
-    const secrets = ((await res.json()) as { secrets?: unknown }).secrets;
-    if (!Array.isArray(secrets)) throw new Error(`GET ${path} did not return a secrets list`);
-    return new Set(secrets.map((s) => (s as { secretId?: unknown }).secretId).filter((id) => typeof id === 'string'));
-  };
 
-  const agents = await list('/v1/agents');
-  const agent = agents.find((a) => a.identifier === identifier);
-  if (typeof agent?.id !== 'string') throw new Error(`OneCLI agent ${identifier} not found after creating it`);
+  const agent = (await list('/v1/agents')).find((a) => a.identifier === identifier);
+  if (typeof agent?.id !== 'string') throw new Error(`OneCLI agent ${identifier} not found`);
   const agentPath = `/v1/agents/${encodeURIComponent(agent.id)}`;
-  try {
-    const grants = await request(`${agentPath}/grants`);
-    // Only a gateway that does not know the route at all lacks grants (1.42
-    // answers `invalid_request_error`, "Unrecognized request URL"); any other
-    // 404, such as "Agent not found.", is a failure.
-    if (grants.status === 404 && (await isUnknownRoute(grants))) return null;
-    if (!grants.ok) throw new Error(`GET ${agentPath}/grants returned ${grants.status}`);
-    const vault: string[] = [];
-    for (const secret of await list('/v1/secrets')) {
-      if (typeof secret.id !== 'string') throw new Error('a OneCLI secret has no id');
-      vault.push(secret.id);
-    }
-    // The secret sets of the counted agents, and the default agent's as the base case.
-    const counted: Set<string>[] = [];
-    const fallback: Set<string>[] = [];
-    for (const other of agents) {
-      if (other === agent) continue;
-      if (typeof other.id !== 'string') throw new Error('a OneCLI agent has no id');
-      const held = await grantedSecretIds(other.id);
-      if (held.size === 0) continue;
-      (other.isDefault === true ? fallback : counted).push(held);
-    }
-    const basis = counted.length ? counted : fallback;
-    const ids = vault.filter((id) => basis.every((held) => held.has(id)));
-    for (const id of ids) {
-      const res = await request(`${agentPath}/grants/secrets/${encodeURIComponent(id)}`, 'PUT');
-      if (!res.ok) throw new Error(`attaching secret ${id} returned ${res.status}`);
-    }
-    return ids.length;
-  } catch (err) {
-    const removed = await request(agentPath, 'DELETE').then(
-      (res) => res.ok,
-      () => false,
-    );
-    throw new Error(
-      `OneCLI: could not grant the shared secrets to new agent ${identifier} (${(err as Error).message}); ` +
-        (removed
-          ? 'the agent was deleted, so the next spawn creates it and retries'
-          : `deleting it also failed: run \`onecli agents delete --id ${agent.id}\` before the next spawn`),
-      { cause: err },
-    );
+  const grants = await request(`${agentPath}/grants`);
+  // Only a gateway that does not know the route at all lacks grants (1.42
+  // answers `invalid_request_error`, "Unrecognized request URL"); any other
+  // 404, such as "Agent not found.", is a failure.
+  if (grants.status === 404 && (await isUnknownRoute(grants))) return null;
+  if (!grants.ok) throw new Error(`GET ${agentPath}/grants returned ${grants.status}`);
+  const granted = ((await grants.json()) as { secrets?: unknown }).secrets;
+  if (!Array.isArray(granted)) throw new Error(`GET ${agentPath}/grants did not return a secrets list`);
+  const held = new Set(granted.map((g) => (g as { secretId?: unknown }).secretId));
+
+  const vault = await list('/v1/secrets');
+  const live = new Set(vault.map((secret) => secret.id).filter((id): id is string => typeof id === 'string'));
+  let ids = (readProviderCredentials(dataDir)[provider] ?? []).filter((id) => live.has(id));
+  if (ids.length === 0) {
+    ids = vault
+      .filter((secret) => typeof secret.id === 'string' && isSavedProviderCredentialName(provider, secret.name))
+      .map((secret) => secret.id as string);
+    if (ids.length) recordProviderCredentials(dataDir, provider, ids, { replace: true });
   }
+  const missing = ids.filter((id) => !held.has(id));
+  for (const id of missing) {
+    const res = await request(`${agentPath}/grants/secrets/${encodeURIComponent(id)}`, 'PUT');
+    if (!res.ok) throw new Error(`attaching secret ${id} returned ${res.status}`);
+  }
+  if (ids.length === 0) {
+    log.warn('No model credential is recorded for this provider; the agent group gets none', {
+      agentGroupId: identifier,
+      provider,
+    });
+  }
+  return missing;
 }
 
-// One in-flight agent setup per agent group in this host process. A second
-// spawn for the same group joins the first one's promise instead of calling
-// ensureAgent itself: otherwise it would get 409 (created: false) and return
-// the agent's credentials before the creator had attached any grants, and a
-// failed attach would then delete an agent that session already uses.
+// One in-flight agent setup per agent group and provider in this host process:
+// concurrent spawns share one ensureAgent call and one grants check.
 const agentSetup = new Map<string, Promise<void>>();
 
-// Grant steps for new agents run one at a time across all groups, so a new
-// agent's set is computed only after every earlier new agent in this process
-// holds its full grants. An agent created meanwhile still has no grants and is
-// not counted. Existing agents never enter this queue.
-let grantQueue: Promise<unknown> = Promise.resolve();
-
-function oneAtATime<T>(task: () => Promise<T>): Promise<T> {
-  const run = grantQueue.then(task, task);
-  grantQueue = run.catch(() => undefined);
-  return run;
-}
-
-function ensureAgentReady(identifier: string, name: string): Promise<void> {
-  const inFlight = agentSetup.get(identifier);
+function ensureAgentReady(identifier: string, name: string, provider: string | undefined): Promise<void> {
+  const key = `${identifier}\0${provider ?? ''}`;
+  const inFlight = agentSetup.get(key);
   if (inFlight) return inFlight;
   const setup = (async () => {
-    const agent = await onecli.ensureAgent({ name, identifier });
-    if (!agent.created) return;
-    const attached = await oneAtATime(() =>
-      grantSharedSecretsToNewAgent(identifier, {
+    await onecli.ensureAgent({ name, identifier });
+    if (!provider) return;
+    let attached: string[] | null;
+    try {
+      attached = await grantProviderCredentials(identifier, provider, {
         baseUrl: onecliUrl || 'https://api.onecli.sh',
         apiKey: onecliApiKey,
         projectId: process.env.ONECLI_PROJECT_ID,
-      }),
-    );
-    if (attached !== null) {
-      log.info('OneCLI agent created with the shared secrets granted', {
-        agentGroupId: identifier,
-        secrets: attached,
       });
+    } catch (err) {
+      throw new Error(
+        `OneCLI: could not grant the ${provider} model credential to agent group ${identifier} ` +
+          `(${(err as Error).message}); the next spawn retries`,
+        { cause: err },
+      );
+    }
+    if (attached?.length) {
+      log.info('OneCLI model credential granted', { agentGroupId: identifier, provider, secrets: attached.length });
     }
   })();
-  agentSetup.set(identifier, setup);
+  agentSetup.set(key, setup);
   const clear = () => {
-    if (agentSetup.get(identifier) === setup) agentSetup.delete(identifier);
+    if (agentSetup.get(key) === setup) agentSetup.delete(key);
   };
   setup.then(clear, clear);
   return setup;
@@ -293,7 +252,7 @@ function ensureAgentReady(identifier: string, name: string): Promise<void> {
 async function ensureSession(input: GatewaySessionInput, signal: AbortSignal): Promise<GatewaySessionLease> {
   // The OneCLI agent identifier is always the agent group id — stable across
   // sessions and reversible via getAgentGroup() for approval routing.
-  await ensureAgentReady(input.key.agentGroupId, input.groupName);
+  await ensureAgentReady(input.key.agentGroupId, input.groupName, input.provider);
   const config = await onecli.getContainerConfig({ agent: input.key.agentGroupId });
   log.info('OneCLI gateway applied', { agentGroupId: input.key.agentGroupId, sessionId: input.key.sessionId });
   return {
