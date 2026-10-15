@@ -359,16 +359,16 @@ describe('OneCLI gateway package', () => {
     });
   });
 
-  it('matches typed model keys too: a dashboard-named Anthropic key, and a ChatGPT login for Codex', async () => {
+  it('matches names only: a typed key under another name may be one user’s, so it is not adopted', async () => {
     const gateway = fakeGateway({
       vault: [
-        { id: 'sec-claude', name: 'My Claude key', type: 'anthropic' },
+        { id: 'sec-model', name: 'Anthropic', type: 'anthropic' },
+        { id: 'sec-bob', name: 'Anthropic (Bob)', type: 'anthropic' },
         { id: 'sec-chatgpt', name: 'OpenCode ChatGPT', type: 'openai' },
-        { id: 'sec-oc-anthropic', name: 'OpenCode anthropic', type: 'generic' },
       ],
     });
-    await expect(grant(gateway)).resolves.toEqual(['sec-claude']);
-    await expect(grant(gateway, 'codex')).resolves.toEqual(['sec-chatgpt']);
+    await expect(grant(gateway)).resolves.toEqual(['sec-model']);
+    await expect(grant(gateway, 'codex')).resolves.toEqual([]);
   });
 
   it('matches by name only once: after this install’s credential is deleted, another same-named one is not adopted', async () => {
@@ -387,6 +387,25 @@ describe('OneCLI gateway package', () => {
       ],
     });
     await expect(grant(gateway, 'opencode')).resolves.toEqual(['sec-oc', 'sec-chatgpt']);
+  });
+
+  it('a match another host finished meanwhile is not repeated (checked again under the lock)', async () => {
+    const gateway = fakeGateway({
+      vault: [
+        { id: 'sec-mine', name: 'Anthropic' },
+        { id: 'sec-other', name: 'Anthropic' },
+      ],
+    });
+    const fetchImpl = (async (url: string | URL | Request, init?: RequestInit) => {
+      const res = await gateway.fetch(url, init);
+      // Another host process completes the one-time match while this one reads the vault.
+      if (new URL(String(url)).pathname === '/v1/secrets') writeRecord(data, { claude: ['sec-mine'] });
+      return res;
+    }) as typeof fetch;
+    await expect(
+      grantProviderCredentials('g1', 'claude', { baseUrl: 'http://gw.test', fetchImpl, dataDir: data }),
+    ).resolves.toEqual(['sec-mine']);
+    expect(readRecord(data)).toEqual({ providers: { claude: ['sec-mine'] }, matched: ['claude'] });
   });
 
   it('after the one-time match, only recorded ids count (a renamed or new same-named secret adds nothing)', async () => {

@@ -33,15 +33,20 @@ it('counts only credentials Codex groups will be granted, records them, and fail
   const record = () =>
     JSON.parse(fs.readFileSync(path.join(root, 'data', 'onecli', 'provider-credentials.json'), 'utf8')).providers;
   try {
-    // OpenCode's API key on the OpenAI host is not Codex's: Codex setup must still sign in.
-    exec.mockReturnValueOnce(JSON.stringify({ data: [{ id: 'sec-oc', name: 'OpenCode openai', type: 'generic' }] }));
-    expect(await createCredentialStore(root).has('codex')).toBe(false);
-    // A ChatGPT login (typed openai) is granted to Codex groups, so a retried login records it.
+    // OpenCode's credentials are not Codex's: Codex setup must still sign in.
     exec.mockReturnValueOnce(
-      JSON.stringify({ hint: 'h', data: [{ id: 'sec-chatgpt', name: 'OpenCode ChatGPT', type: 'openai' }] }),
+      JSON.stringify({
+        data: [
+          { id: 'sec-oc', name: 'OpenCode openai', type: 'generic' },
+          { id: 'sec-chatgpt', name: 'OpenCode ChatGPT', type: 'openai' },
+        ],
+      }),
     );
+    expect(await createCredentialStore(root).has('codex')).toBe(false);
+    // A credential Codex setup saved is counted and recorded, so a retried login repairs the record.
+    exec.mockReturnValueOnce(JSON.stringify({ hint: 'h', data: [{ id: 'sec-codex', name: 'Codex', type: 'openai' }] }));
     expect(await createCredentialStore(root).has('codex')).toBe(true);
-    expect(record()).toEqual({ codex: ['sec-chatgpt'] });
+    expect(record()).toEqual({ codex: ['sec-codex'] });
     expect(exec.mock.calls.every(([, args]) => args.join(' ') === 'secrets list --max 0')).toBe(true);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });

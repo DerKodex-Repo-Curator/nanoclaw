@@ -141,18 +141,11 @@ async function isUnknownRoute(res: Response): Promise<boolean> {
 }
 
 /**
- * Make sure an agent group's OneCLI agent holds the model credential for the
- * provider it runs: the secrets this install recorded when that provider's
- * login saved them. From 1.44 an agent receives only the secrets attached to
- * it and a new one starts with none. Tool secrets and app connections are
- * never attached here; the skill that adds one attaches it to chosen groups.
- *
- * Runs on every spawn and only adds missing grants, so an interrupted first
- * setup, a provider switch, or a login saved after the group existed is
- * repaired on the next spawn. A gateway without the grants API (1.43 and
- * older) keeps its `all` mode, so nothing is attached. Any failure throws and
- * the spawn fails; nothing is deleted. Returns the ids attached, or null on a
- * gateway without grants.
+ * From 1.44 an agent receives only the secrets attached to it, so attach the
+ * model credentials this install recorded for the group's provider; tool
+ * secrets and app connections stay opt-in. Runs on every spawn and only adds,
+ * so later spawns repair an interrupted setup or a provider switch. Returns the
+ * ids attached, or null on a gateway without grants (1.43 and older).
  */
 export async function grantProviderCredentials(
   identifier: string,
@@ -189,9 +182,9 @@ export async function grantProviderCredentials(
   if (!Array.isArray(granted)) throw new Error(`GET ${agentPath}/grants did not return a secrets list`);
   const held = new Set(granted.map((g) => (g as { secretId?: unknown }).secretId));
 
+  let record = readProviderCredentials(dataDir);
   const vault = await list('/v1/secrets');
   const live = new Set(vault.map((secret) => secret.id).filter((id): id is string => typeof id === 'string'));
-  let record = readProviderCredentials(dataDir);
   if (!record.matched.includes(provider)) {
     // Once per provider: adopt the secrets NanoClaw's setup saved before ids
     // were recorded. On a shared gateway that includes another install's
@@ -200,8 +193,9 @@ export async function grantProviderCredentials(
       .filter((secret) => typeof secret.id === 'string' && isSavedProviderCredential(provider, secret))
       .map((secret) => secret.id as string);
     record = updateProviderCredentials(dataDir, (r) => {
+      if (r.matched.includes(provider)) return;
       r.providers[provider] = [...new Set([...(r.providers[provider] ?? []), ...found])];
-      r.matched = [...new Set([...r.matched, provider])];
+      r.matched.push(provider);
     });
   }
   const ids = (record.providers[provider] ?? []).filter((id) => live.has(id));

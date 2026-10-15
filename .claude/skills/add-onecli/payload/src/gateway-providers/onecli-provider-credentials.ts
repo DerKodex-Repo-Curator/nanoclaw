@@ -48,8 +48,8 @@ const sleep = (ms: number) => Atomics.wait(new Int32Array(new SharedArrayBuffer(
 
 /**
  * Read, change and write the record under a lock file, so the host process and
- * a setup script never drop each other's ids. A lock older than 30s is a crashed
- * writer's and is taken over.
+ * a setup script never drop each other's ids. A stuck lock is never taken over
+ * automatically (that races a live writer); the error names it.
  */
 export function updateProviderCredentials(
   dataDir: string,
@@ -67,10 +67,10 @@ export function updateProviderCredentials(
       break;
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
-      const age = Date.now() - (fs.statSync(lock, { throwIfNoEntry: false })?.mtimeMs ?? Date.now());
-      if (age > 30_000) fs.rmSync(lock, { force: true });
-      else if (Date.now() > deadline) throw new Error(`${lock} is held by another writer; retry`);
-      else sleep(25);
+      if (Date.now() > deadline) {
+        throw new Error(`${lock} is held; retry, or delete it if no NanoClaw setup or host is running`);
+      }
+      sleep(25);
     }
   }
   try {
@@ -97,17 +97,16 @@ export function recordProviderCredentials(
   });
 }
 
-// The secrets NanoClaw's provider setup saves, by name, plus typed model keys.
-// A typed `openai` record is the ChatGPT login format Codex and OpenCode share.
-const SAVED: Record<string, (secret: { name: string; type: unknown }) => boolean> = {
-  claude: ({ name, type }) => name === 'Anthropic' || type === 'anthropic',
-  codex: ({ name, type }) => /^(codex|openai)$/i.test(name) || type === 'openai',
-  opencode: ({ name }) => name.startsWith('OpenCode '),
+// The names NanoClaw's provider setup gives the secrets it saves. Names only:
+// a typed key under another name may be one user's in a per-user setup.
+const SAVED: Record<string, (name: string) => boolean> = {
+  claude: (name) => name === 'Anthropic',
+  codex: (name) => /^(codex|openai)$/i.test(name),
+  opencode: (name) => name.startsWith('OpenCode '),
 };
 
-export function isSavedProviderCredential(provider: string, secret: { name?: unknown; type?: unknown }): boolean {
-  const match = SAVED[provider];
-  return typeof secret.name === 'string' && match !== undefined && match({ name: secret.name, type: secret.type });
+export function isSavedProviderCredential(provider: string, secret: { name?: unknown }): boolean {
+  return typeof secret.name === 'string' && (SAVED[provider]?.(secret.name) ?? false);
 }
 
 /** Pulls the secret id out of `onecli secrets create` output (JSON, possibly with a `hint` key). */

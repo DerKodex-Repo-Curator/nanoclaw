@@ -167,7 +167,8 @@ describe('OneCLI upgrade guide: save commands', () => {
 // that prints the given draft/published rules and project default.
 describe('OneCLI upgrade guide: pre-upgrade check', () => {
   const guide = fs.readFileSync(GUIDE, 'utf8');
-  const checkLines = guide.split('\n').filter((l) => l.startsWith('(export ONECLI_API_HOST='));
+  const CHECK = 'sh .claude/skills/add-onecli/scripts/pre-upgrade-check.sh';
+  const SCRIPT = path.resolve(__dirname, '../.claude/skills/add-onecli/scripts/pre-upgrade-check.sh');
 
   type Rule = Record<string, unknown>;
   const rule = (over: Rule = {}): Rule => ({
@@ -216,16 +217,15 @@ esac
       { mode: 0o755 },
     );
     const gw = opts.gw === undefined ? 'http://172.17.0.1:10254' : opts.gw;
-    return spawnSync('sh', ['-c', checkLines[0]], {
+    return spawnSync('sh', [SCRIPT], {
       env: { PATH: `${bin}:${process.env.PATH ?? ''}`, HOME: home, ...(gw === null ? {} : { GW: gw }) },
       encoding: 'utf8',
     });
   }
 
   it('is one command and runs before the pin is written to ~/.onecli/.env', () => {
-    expect(checkLines).toHaveLength(1);
-    expect(guide.indexOf(checkLines[0])).toBeLessThan(guide.indexOf(saveLine(UPGRADE)));
-    expect(checkLines[0]).not.toMatch(/!|\s#\s/);
+    expect(guide.split('\n').filter((l) => l === CHECK)).toHaveLength(1);
+    expect(guide.indexOf(CHECK)).toBeLessThan(guide.indexOf(saveLine(UPGRADE)));
   });
 
   it('passes a policy the conversion keeps: app rules, connection session policies, blocklist rows', () => {
@@ -271,6 +271,16 @@ esac
     expect(r.status).not.toBe(0);
     expect(r.stdout).not.toContain('OK:');
     expect(fs.existsSync(path.join(home, 'onecli.log'))).toBe(false);
+  });
+
+  it('stops when the draft has unpublished changes, which the conversion would publish', () => {
+    const block = rule({ name: 'no github writes', action: 'block' });
+    const r = check({ rules: [], published: [block] });
+    expect(r.status).toBe(1);
+    expect(r.stdout).toContain('unpublished changes');
+    expect(
+      check({ rules: [block], published: [{ ...block, id: 'pub-1', status: 'published', generation: 3 }] }).status,
+    ).toBe(0);
   });
 
   it('stops on a block project default', () => {

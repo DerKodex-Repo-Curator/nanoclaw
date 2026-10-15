@@ -50,16 +50,17 @@ describe('OneCLI provider credential record', () => {
     expect(() => recordProviderCredentials(data, 'claude', ['a'])).toThrow();
   });
 
-  it('waits for another writer’s lock, and takes over a crashed writer’s stale lock', () => {
+  it('waits for another writer’s lock and never takes one over, naming it instead', () => {
     recordProviderCredentials(data, 'claude', ['a']);
     const lock = `${providerCredentialFile(data)}.lock`;
     fs.writeFileSync(lock, '');
-    expect(() => updateProviderCredentials(data, () => {}, { lockTimeoutMs: 100 })).toThrow(/held by another writer/);
     const old = new Date(Date.now() - 60_000);
     fs.utimesSync(lock, old, old);
+    expect(() => updateProviderCredentials(data, () => {}, { lockTimeoutMs: 100 })).toThrow(/\.lock is held/);
+    expect(fs.existsSync(lock)).toBe(true);
+    fs.rmSync(lock);
     recordProviderCredentials(data, 'codex', ['c']);
     expect(readProviderCredentials(data).providers).toEqual({ claude: ['a'], codex: ['c'] });
-    expect(fs.existsSync(lock)).toBe(false);
   });
 
   it('never drops an id when separate processes record at the same time', async () => {
@@ -78,21 +79,19 @@ describe('OneCLI provider credential record', () => {
     expect(readProviderCredentials(data).providers.p).toHaveLength(60);
   });
 
-  it('matches the secrets NanoClaw provider setup saves, by name or model-key type', () => {
+  it('matches only the names NanoClaw provider setup writes', () => {
     const is = isSavedProviderCredential;
-    expect(is('claude', { name: 'Anthropic', type: 'generic' })).toBe(true);
-    expect(is('claude', { name: 'My key', type: 'anthropic' })).toBe(true);
-    expect(is('claude', { name: 'OpenCode anthropic', type: 'generic' })).toBe(false);
-    expect(is('claude', { name: 'Anthropic Dial' })).toBe(false);
+    expect(is('claude', { name: 'Anthropic' })).toBe(true);
+    expect(is('claude', { name: 'My key', type: 'anthropic' } as never)).toBe(false);
+    expect(is('claude', { name: 'OpenCode anthropic' })).toBe(false);
     expect(is('codex', { name: 'Codex' })).toBe(true);
     expect(is('codex', { name: 'openai' })).toBe(true);
-    expect(is('codex', { name: 'OpenCode ChatGPT', type: 'openai' })).toBe(true);
-    expect(is('codex', { name: 'OpenCode openai', type: 'generic' })).toBe(false);
+    expect(is('codex', { name: 'OpenCode ChatGPT', type: 'openai' } as never)).toBe(false);
     expect(is('opencode', { name: 'OpenCode ChatGPT' })).toBe(true);
     expect(is('opencode', { name: 'OpenCode openrouter' })).toBe(true);
     expect(is('opencode', { name: 'Vercel API Token' })).toBe(false);
-    expect(is('ollama', { name: 'Anthropic', type: 'anthropic' })).toBe(false);
-    expect(is('claude', { type: 'anthropic' })).toBe(false);
+    expect(is('ollama', { name: 'Anthropic' })).toBe(false);
+    expect(is('claude', {})).toBe(false);
   });
 
   it('reads the id from `onecli secrets create` output, with or without a hint', () => {

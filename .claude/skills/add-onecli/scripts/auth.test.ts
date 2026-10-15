@@ -56,16 +56,19 @@ it('records the Anthropic secret a subscription sign-in saved', async () => {
   expect(record()).toEqual({ claude: ['sec-sub'] });
 });
 
-it('an already connected Claude key is recorded, and an OpenCode Anthropic key does not count as connected', async () => {
-  child.exec.mockReturnValueOnce(
-    JSON.stringify({ data: [{ id: 'sec-dash', name: 'Claude from the dashboard', type: 'anthropic' }] }),
-  );
+it('an already saved Anthropic key is recorded; a differently named or OpenCode key does not count as connected', async () => {
+  child.exec.mockReturnValueOnce(JSON.stringify({ data: [{ id: 'sec-a', name: 'Anthropic', type: 'anthropic' }] }));
   await run();
-  expect(record()).toEqual({ claude: ['sec-dash'] });
+  expect(record()).toEqual({ claude: ['sec-a'] });
   expect(prompts.select).not.toHaveBeenCalled();
   fs.rmSync(path.join(root, 'data'), { recursive: true });
   child.exec.mockReturnValueOnce(
-    JSON.stringify({ data: [{ id: 'sec-oc', name: 'OpenCode anthropic', type: 'generic' }] }),
+    JSON.stringify({
+      data: [
+        { id: 'sec-oc', name: 'OpenCode anthropic', type: 'generic' },
+        { id: 'sec-bob', name: 'Anthropic (Bob)', type: 'anthropic' },
+      ],
+    }),
   );
   prompts.select.mockResolvedValueOnce('skip');
   await run();
