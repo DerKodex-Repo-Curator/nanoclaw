@@ -335,3 +335,62 @@ esac
     expect(r.stderr).toContain('STOP');
   });
 });
+
+// The restore command, taken out of the guide and run against a stub `docker`.
+describe('OneCLI upgrade guide: restoring the backup', () => {
+  const guide = fs.readFileSync(GUIDE, 'utf8');
+  const restoreLines = guide.split('\n').filter((l) => l.includes('psql -q -v ON_ERROR_STOP=1'));
+  const PLACEHOLDER = /F=<backup file from step 2>/;
+
+  function restore(file: string, dockerBody = '') {
+    const bin = path.join(home, 'bin');
+    fs.mkdirSync(bin, { recursive: true });
+    fs.writeFileSync(path.join(bin, 'docker'), `#!/bin/sh\necho "$*" >> "${home}/docker.log"\n${dockerBody}\n`, {
+      mode: 0o755,
+    });
+    const cmd = restoreLines[0].replace(PLACEHOLDER, () => `F=${file}`);
+    return spawnSync('sh', ['-c', cmd], {
+      env: { PATH: `${bin}:${process.env.PATH ?? ''}`, HOME: home },
+      encoding: 'utf8',
+    });
+  }
+  const dockerLog = () =>
+    fs.existsSync(path.join(home, 'docker.log'))
+      ? fs.readFileSync(path.join(home, 'docker.log'), 'utf8').trim().split('\n')
+      : [];
+
+  it('is one command, comes after the rollback save, and has no `!` or trailing comment', () => {
+    expect(restoreLines).toHaveLength(1);
+    expect(guide.indexOf(restoreLines[0])).toBeGreaterThan(guide.indexOf(saveLine(ROLLBACK)));
+    expect(restoreLines[0]).not.toMatch(/!|\s#\s/);
+  });
+
+  it.each([
+    ['a missing file', () => path.join(home, 'nope.sql')],
+    ['an empty file', () => (fs.writeFileSync(path.join(home, 'empty.sql'), ''), path.join(home, 'empty.sql'))],
+  ])('refuses %s before touching the gateway', (_name, file) => {
+    const r = restore(file());
+    expect(r.status).not.toBe(0);
+    expect(r.stderr).toContain('Not restored');
+    expect(dockerLog()).toEqual([]);
+  });
+
+  it('stops the gateway, recreates the database, loads the backup, then starts the gateway', () => {
+    const file = path.join(home, 'onecli-db-backup.sql');
+    fs.writeFileSync(file, '-- PostgreSQL database dump complete\n');
+    expect(restore(file).status).toBe(0);
+    const log = dockerLog();
+    expect(log[0]).toBe('compose stop onecli');
+    expect(log[1]).toMatch(/^compose exec -T postgres sh -c dropdb .* && createdb /);
+    expect(log[2]).toMatch(/^compose exec -T postgres sh -c psql -q -v ON_ERROR_STOP=1 /);
+    expect(log[3]).toBe('compose up -d');
+  });
+
+  it('does not start the gateway on a database that failed to load', () => {
+    const file = path.join(home, 'onecli-db-backup.sql');
+    fs.writeFileSync(file, 'broken\n');
+    const r = restore(file, 'case "$*" in *psql*) exit 3;; esac');
+    expect(r.status).not.toBe(0);
+    expect(dockerLog()).not.toContain('compose up -d');
+  });
+});

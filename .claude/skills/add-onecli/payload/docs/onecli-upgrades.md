@@ -77,7 +77,7 @@ Back up the gateway database before you pull or restart. A newer gateway can mig
 cd ~/.onecli && (umask 077 && F=~/onecli-db-backup-$(date +%Y%m%d-%H%M%S).sql && docker compose exec -T postgres sh -c 'pg_dump -U "$POSTGRES_USER" "$POSTGRES_DB"' > "$F.part" && grep -q 'PostgreSQL database dump complete' "$F.part" && mv "$F.part" "$F" || { rm -f "$F.part"; echo "Backup failed, nothing saved" >&2; exit 1; }; ls -l "$F")
 ```
 
-It prints the new file only when the dump is complete. If the dump fails or stops early, it says so and leaves no file behind; a leftover file ending in `.part` is not a backup. Only you can read the file. `postgres` is the database service in the stock compose file; use your service's name if it differs. Restoring it was tested once, from 1.45.0 back to 1.42.0: loaded with `psql` into a new, empty database, it brought the gateway back without the startup error and with its stored secret. There is no restore command in this guide yet. Stored secrets are encrypted with a key kept outside the database. By default it is the `secret-encryption-key` file in the `app-data` volume; if you set `SECRET_ENCRYPTION_KEY` yourself, it is wherever you set it. Either way, the dump alone does not recover secrets without that key.
+It prints the new file only when the dump is complete. If the dump fails or stops early, it says so and leaves no file behind; a leftover file ending in `.part` is not a backup. Only you can read the file. `postgres` is the database service in the stock compose file; use your service's name if it differs. Restoring it was tested once, from 1.45.0 back to 1.42.0: loaded with `psql` into a new, empty database, it brought the gateway back without the startup error and with its stored secret. The restore command is under [Rollback](#4-rollback). Stored secrets are encrypted with a key kept outside the database. By default it is the `secret-encryption-key` file in the `app-data` volume; if you set `SECRET_ENCRYPTION_KEY` yourself, it is wherever you set it. Either way, the dump alone does not recover secrets without that key.
 
 Then pull and restart:
 
@@ -85,7 +85,7 @@ Then pull and restart:
 cd ~/.onecli && env -u ONECLI_VERSION docker compose pull onecli && env -u ONECLI_VERSION docker compose up -d
 ```
 
-Then check the conversion: `docker logs onecli 2>&1 | grep grant-conversion` must report `0 failed`. Existing agents keep what the conversion gave them. From now on an agent receives only the secrets attached to it: NanoClaw attaches a group's model credential (the one its provider setup saved) on every spawn, and nothing else. A tool secret or app connection reaches a new group only when you attach it, through the skill that added it or with `onecli agents grants attach-secret`.
+Then check the conversion. Its log line appears a few seconds after `/v1/health` answers, so wait, then run `docker logs onecli 2>&1 | grep grant-conversion`; it must report `0 failed`. Existing agents keep what the conversion gave them. From now on an agent receives only the secrets attached to it: NanoClaw attaches a group's model credential (the one its provider setup saved) on every spawn, and nothing else. A tool secret or app connection reaches a new group only when you attach it, through the skill that added it or with `onecli agents grants attach-secret`.
 
 **If a gateway newer than the pin has started, even briefly:** it can migrate its database, and going back to the pin does not undo that. Put the gateway back on the pin (step 2), then check `docker logs onecli 2>&1 | grep -iE 'migrat|error'`. Access rules and approvals were not checked in testing. If you see a database error, restore a backup taken before the newer version ran (the one from step 2, if you took it in time). There is no other tested repair, so otherwise [open an issue](https://github.com/nanocoai/nanoclaw/issues) with the log lines.
 
@@ -136,7 +136,15 @@ If the old gateway ran `:latest`, `latest` now means a different image. Give the
 
 If the NanoClaw update itself is being rolled back, also pin `@onecli-sh/sdk` back to its previous version in `package.json` and run `pnpm install`. Stored secrets survive in both directions. Access settings may not: grants and policies changed on the newer gateway are not carried back, so check that agents still get their credentials after a rollback.
 
-**Rolling back from 1.44 or later to 1.43 or older needs the backup from step 2; restoring it is the only supported rollback.** The upgrade migrates the database in ways the old gateway cannot read: without the backup, it starts with a `policy_rule_identities.agent_group_id does not exist` error, and every agent the upgrade converted is left in `selective` mode with an empty secret list, so it gets no credentials (tested from 1.45.0 to 1.42.0). Restore the backup into a new, empty database. Switching agents back to `all` mode without it (`onecli agents set-secret-mode`) brings back credential injection only: the deleted rules stay deleted, policy stays broken, and an agent that was `selective` before the upgrade would receive every matching secret, so it is not supported.
+**Rolling back from 1.44 or later to 1.43 or older needs the backup from step 2; restoring it is the only supported rollback.** The upgrade migrates the database in ways the old gateway cannot read: without the backup, it starts with a `policy_rule_identities.agent_group_id does not exist` error, and every agent the upgrade converted is left in `selective` mode with an empty secret list, so it gets no credentials. Switching agents back to `all` mode without it (`onecli agents set-secret-mode`) brings back credential injection only: the deleted rules stay deleted, policy stays broken, and an agent that was `selective` before the upgrade would receive every matching secret, so it is not supported.
+
+After saving the old version above, restore the backup into a new, empty database. This replaces the gateway's database: anything changed since the backup is lost. Put the backup's path in `F`; the command stops before touching anything if the file is missing or empty:
+
+```bash
+cd ~/.onecli && (F=<backup file from step 2> && [ -s "$F" ] || { echo "Not restored: '$F' is not a backup file" >&2; exit 1; }; docker compose stop onecli && docker compose exec -T postgres sh -c 'dropdb -U "$POSTGRES_USER" "$POSTGRES_DB" && createdb -U "$POSTGRES_USER" "$POSTGRES_DB"' && docker compose exec -T postgres sh -c 'psql -q -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" "$POSTGRES_DB"' < "$F" && env -u ONECLI_VERSION docker compose up -d)
+```
+
+Tested from 1.45.0 back to 1.42.0: the gateway came back without the startup error, with its agents in `all` mode, its secrets, and its rules. An agent group created after the backup gets a fresh `all`-mode agent on its next spawn.
 
 ## The CLI binary (`onecli-cli` pin)
 
