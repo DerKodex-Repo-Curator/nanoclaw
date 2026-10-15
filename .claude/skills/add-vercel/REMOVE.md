@@ -24,9 +24,9 @@ rm -f src/vercel-manifest.test.ts
 Detach the Vercel secret from every agent, then delete it:
 
 ```bash
-VERCEL_SECRET_ID=$(onecli secrets list | jq -r '.data[] | select(.name | test("(?i)vercel")) | .id' | head -1)
+VERCEL_SECRET_ID=$(onecli secrets list --max 0 | jq -r '.data[] | select(.name | test("(?i)vercel")) | .id' | head -1)
 if [ -n "$VERCEL_SECRET_ID" ]; then
-  for agent in $(onecli agents list | jq -r '.data[].id'); do
+  for agent in $(onecli agents list --max 0 | jq -r '.data[].id'); do
     onecli agents grants detach-secret --id "$agent" --secret-id "$VERCEL_SECRET_ID" >/dev/null
   done
   onecli secrets delete --id "$VERCEL_SECRET_ID"
