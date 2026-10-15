@@ -162,3 +162,119 @@ describe('OneCLI upgrade guide: save commands', () => {
     expect(warning).not.toContain('step 4');
   });
 });
+
+// The pre-upgrade check, taken out of the guide and run against a stub `onecli`
+// that prints the given draft/published rules and project default.
+describe('OneCLI upgrade guide: pre-upgrade check', () => {
+  const guide = fs.readFileSync(GUIDE, 'utf8');
+  const checkLines = guide.split('\n').filter((l) => l.startsWith('(found=0; for st in draft published;'));
+
+  type Rule = Record<string, unknown>;
+  const rule = (over: Rule = {}): Rule => ({
+    name: 'app rule',
+    action: 'allow',
+    isDefault: false,
+    source: 'custom',
+    rateLimit: null,
+    conditions: null,
+    targets: [{ kind: 'app', provider: 'github' }],
+    ...over,
+  });
+
+  function check(opts: {
+    rules?: Rule[];
+    published?: Rule[];
+    def?: string;
+    fail?: string;
+    raw?: string;
+    hint?: boolean;
+  }) {
+    const bin = path.join(home, 'bin');
+    fs.mkdirSync(bin, { recursive: true });
+    const rules = (st: string) => {
+      const list = st === 'published' ? (opts.published ?? opts.rules ?? []) : (opts.rules ?? []);
+      return JSON.stringify(opts.hint ? { hint: 'project rules', data: list } : list);
+    };
+    fs.writeFileSync(path.join(home, 'draft.json'), opts.raw ?? rules('draft'));
+    fs.writeFileSync(path.join(home, 'published.json'), opts.raw ?? rules('published'));
+    fs.writeFileSync(path.join(home, 'default.json'), JSON.stringify({ isDefault: true, action: opts.def ?? 'allow' }));
+    fs.writeFileSync(
+      path.join(bin, 'onecli'),
+      `#!/bin/sh
+case "$1 $2 $3" in
+  "policy rules list") [ "${opts.fail ?? ''}" = rules ] && { echo '{"error":"unauthorized"}' >&2; exit 1; }; cat "${home}/$5.json" ;;
+  "policy default get") [ "${opts.fail ?? ''}" = default ] && exit 1; cat "${home}/default.json" ;;
+  *) exit 9 ;;
+esac
+`,
+      { mode: 0o755 },
+    );
+    return spawnSync('sh', ['-c', checkLines[0]], {
+      env: { PATH: `${bin}:${process.env.PATH ?? ''}`, HOME: home },
+      encoding: 'utf8',
+    });
+  }
+
+  it('is one command and runs before the pin is written to ~/.onecli/.env', () => {
+    expect(checkLines).toHaveLength(1);
+    expect(guide.indexOf(checkLines[0])).toBeLessThan(guide.indexOf(saveLine(UPGRADE)));
+    expect(checkLines[0]).not.toMatch(/!|\s#\s/);
+  });
+
+  it('passes a policy the conversion keeps: app rules, connection session policies, blocklist rows', () => {
+    const r = check({
+      rules: [
+        rule(),
+        rule({ name: 'repo scope', conditions: { repositories: ['a/b'] } }),
+        rule({ name: 'empty conditions', conditions: [] }),
+        rule({ name: 'blocked host', source: 'blocklist', targets: [{ kind: 'network', hostPattern: 'x.test' }] }),
+        rule({ name: 'block with limit', action: 'block', rateLimit: 5 }),
+      ],
+    });
+    expect(r.status).toBe(0);
+    expect(r.stdout).toContain('OK: the conversion deletes nothing');
+  });
+
+  it.each([
+    [
+      'a network rule',
+      rule({
+        name: 'Dial: blocked agents',
+        action: 'block',
+        targets: [{ kind: 'network', hostPattern: 'api.getdial.ai' }],
+      }),
+    ],
+    [
+      'a behavioral rule',
+      rule({ name: 'only weekdays', conditions: [{ field: 'time', op: 'in', value: 'weekdays' }] }),
+    ],
+    ['an allow rule with a rate limit', rule({ name: 'limited', rateLimit: 10 })],
+  ])('stops on %s', (_name, finding) => {
+    const r = check({ rules: [rule(), finding] });
+    expect(r.status).toBe(1);
+    expect(r.stdout).toContain(`rule: ${String(finding.action)}  ${String(finding.name)}`);
+  });
+
+  it('stops on a block project default', () => {
+    const r = check({ def: 'block' });
+    expect(r.status).toBe(1);
+    expect(r.stdout).toContain('default: block');
+  });
+
+  it('stops on a finding only the published rules carry, and reads the CLI hint envelope', () => {
+    const net = rule({ name: 'egress', targets: [{ kind: 'network', hostPattern: 'h.test' }] });
+    expect(check({ rules: [], published: [net] }).status).toBe(1);
+    expect(check({ rules: [net], hint: true }).status).toBe(1);
+  });
+
+  it.each([
+    ['the rules list fails', { fail: 'rules' }],
+    ['the default read fails', { fail: 'default' }],
+    ['the output is not JSON', { raw: 'Unauthorized' }],
+  ])('stops, never reports OK, when %s', (_name, opts) => {
+    const r = check(opts);
+    expect(r.status).not.toBe(0);
+    expect(r.stdout).not.toContain('OK:');
+    expect(r.stderr).toContain('STOP');
+  });
+});

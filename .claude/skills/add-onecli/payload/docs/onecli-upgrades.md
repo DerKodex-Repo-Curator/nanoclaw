@@ -31,6 +31,26 @@ The gateway runs as a Docker service in `~/.onecli`. Upgrade just that container
 
 **Local gateway (the common case).** Run these on the gateway's host; for a **remote gateway**, run them on that host (NanoClaw can't reach it over SSH).
 
+**First, if the gateway runs 1.43 or older and the pin is 1.44 or later, check what the move deletes.** Do this before anything below writes the pin. On its first start a 1.44+ gateway converts the project once:
+
+- Each `all`-mode agent gets an explicit grant for **every** secret in the vault at that moment. Agents already in `selective` mode keep their list.
+- Every custom project **network rule and behavioral rule** (one with a non-empty `conditions` list) is **deleted**, including `block` rules: an agent a rule kept away from a host now receives that host's secret. **Rate limits on allow rules** are dropped, and a **`block` project default is reset to `allow`**.
+- `onecli agents set-secrets`, `onecli agents secrets` and `onecli agents set-secret-mode` answer `410 Gone` afterwards. Use `onecli agents grants list|attach-secret|detach-secret`.
+
+The check needs CLI 2.6 or later for `policy rules`: install the `onecli-cli` pin first ([below](#the-cli-binary-onecli-cli-pin)); it works against the old gateway. It reads both the draft (what the conversion folds) and the published rules, and exits non-zero when it finds something the conversion deletes or changes, or when it cannot read the policy:
+
+```bash
+(found=0; for st in draft published; do r=$(onecli policy rules list --status "$st") && d=$(onecli policy default get --status "$st") || { echo "STOP: could not read the $st policy; do not upgrade" >&2; exit 2; }; hits=$(printf '%s' "$r" | jq -r '(if type == "array" then . else .data end)[] | select((.isDefault | not) and ((.source == "blocklist") | not)) | select(any(.targets[]?; .kind == "network") or (((.conditions | type) == "array") and ((.conditions | length) > 0)) or ((.action == "allow") and ((.rateLimit == null) | not))) | "rule: \(.action)  \(.name)"') && blk=$(printf '%s' "$d" | jq -r 'select(.action == "block") | "default: block"') || { echo "STOP: could not parse the $st policy; do not upgrade" >&2; exit 2; }; if [ -n "$hits$blk" ]; then echo "$st policy, deleted or changed by the conversion:"; printf '%s\n' "$hits" "$blk" | sed '/^$/d'; found=1; fi; done; [ "$found" = 0 ] && echo "OK: the conversion deletes nothing" || exit 1)
+```
+
+If it stops with findings, do not upgrade yet: after the upgrade, access can only be narrowed by detaching secrets from agents, so anything a rule, a rate limit or a `block` default enforced is gone. Note what each finding protects, and upgrade only once you accept that or have a replacement. Also check for `/add-dial-tool`, which keeps unchosen agents away from Dial with a `block` rule named `Dial: blocked agents`:
+
+```bash
+onecli secrets list --max 0 | jq -r '(if type == "array" then . else .data end)[] | select(.name | test("(?i)dial")) | "\(.name)  \(.hostPattern)"'
+```
+
+If it prints a Dial secret, `/add-dial-tool` is installed. It still needs gateway 1.42, so either stay on 1.42 until `/add-dial-tool` supports grants, or remove the Dial secret before upgrading (`onecli secrets delete --id <id>`) and accept that no agent can use Dial until then. If you have already upgraded, detach the Dial secret from every agent that should not have it: `onecli agents grants detach-secret --id <agent-id> --secret-id <dial-secret-id>`.
+
 Write the pin to `~/.onecli/.env`, which Docker Compose reads on every later `docker compose` command. A version given only on the command line is gone after that command, so the next plain `docker compose up` falls back to an older saved value or to `latest`. This keeps the file's other settings and its permissions, and the temporary copy is private to you. The command stops without touching the file when the value is empty or not a version:
 
 ```bash
@@ -57,28 +77,13 @@ cd ~/.onecli && (umask 077 && F=~/onecli-db-backup-$(date +%Y%m%d-%H%M%S).sql &&
 
 It prints the new file only when the dump is complete. If the dump fails or stops early, it says so and leaves no file behind; a leftover file ending in `.part` is not a backup. Only you can read the file. `postgres` is the database service in the stock compose file; use your service's name if it differs. Restoring it was tested once, from 1.45.0 back to 1.42.0: loaded with `psql` into a new, empty database, it brought the gateway back without the startup error and with its stored secret. There is no restore command in this guide yet. Stored secrets are encrypted with a key kept outside the database. By default it is the `secret-encryption-key` file in the `app-data` volume; if you set `SECRET_ENCRYPTION_KEY` yourself, it is wherever you set it. Either way, the dump alone does not recover secrets without that key.
 
-**Moving from 1.43 or older to 1.44 or later** changes how agents get secrets, and deletes rules. Before 1.44 an agent in `all` mode, the default for a new agent, received every vault secret whose host matched, unless a policy rule blocked it. From 1.44 an agent receives only the secrets attached to it, and project policy rules can no longer be written. On its first start the new gateway converts the project once:
-
-- Each `all`-mode agent gets an explicit grant for **every** secret in the vault at that moment. Agents already in `selective` mode keep their list.
-- Every custom project **network or behavioral rule is deleted**, including `block` rules. An agent that a rule kept away from a host now receives that host's secret. The conversion log line counts them (`deleted: N network, N behavioral`).
-- `onecli agents set-secrets`, `onecli agents secrets` and `onecli agents set-secret-mode` answer `410 Gone` afterwards. Use `onecli agents grants list|attach-secret|detach-secret`, which need the `onecli-cli` pin below.
-
-Before you pull, while the old gateway still runs, list the rules the conversion will delete and check for `/add-dial-tool`, which keeps unchosen agents away from Dial with exactly such a rule. `policy rules` needs CLI 2.6 or later: install the `onecli-cli` pin first ([below](#the-cli-binary-onecli-cli-pin)); it also works against the old gateway.
-
-```bash
-onecli policy rules list --status published | jq -r '.[] | select(any(.targets[]?; .kind == "network")) | "\(.action)  \(.name)  \([.targets[].hostPattern] | join(","))"'
-onecli secrets list | jq -r '.data[] | select(.name | test("(?i)dial")) | "\(.name)  \(.hostPattern)"'
-```
-
-If the first command prints any rule you rely on, do not upgrade yet: after the upgrade, access can only be narrowed by detaching secrets from agents. If it prints a `block` rule for `api.getdial.ai` (named `Dial: blocked agents`), or the second command prints a Dial secret, `/add-dial-tool` is installed. It still needs gateway 1.42, so either stay on 1.42 until `/add-dial-tool` supports grants, or remove the Dial secret before upgrading (`onecli secrets delete --id <id>`) and accept that no agent can use Dial until then. If you have already upgraded, detach the Dial secret from every agent that should not have it: `onecli agents grants detach-secret --id <agent-id> --secret-id <dial-secret-id>`.
-
 Then pull and restart:
 
 ```bash
 cd ~/.onecli && env -u ONECLI_VERSION docker compose pull onecli && env -u ONECLI_VERSION docker compose up -d
 ```
 
-Then check the conversion: `docker logs onecli 2>&1 | grep grant-conversion` must report `0 failed`. From now on a secret added to the vault reaches only the agents it is attached to (`onecli agents grants attach-secret`). When NanoClaw creates the agent for a new agent group, it attaches the secrets held by every agent that holds any secret (OneCLI's default agent and empty agents are not counted). Right after the conversion that is every secret that existed, as the old `all` default gave. To restrict a credential, attach it only to chosen agents; then new agents do not get it.
+Then check the conversion: `docker logs onecli 2>&1 | grep grant-conversion` must report `0 failed`. Existing agents keep what the conversion gave them. From now on an agent receives only the secrets attached to it: NanoClaw attaches a group's model credential (the one its provider setup saved) on every spawn, and nothing else. A tool secret or app connection reaches a new group only when you attach it, through the skill that added it or with `onecli agents grants attach-secret`.
 
 **If a gateway newer than the pin has started, even briefly:** it can migrate its database, and going back to the pin does not undo that. Put the gateway back on the pin (step 2), then check `docker logs onecli 2>&1 | grep -iE 'migrat|error'`. Access rules and approvals were not checked in testing. If you see a database error, restore a backup taken before the newer version ran (the one from step 2, if you took it in time). There is no other tested repair, so otherwise [open an issue](https://github.com/nanocoai/nanoclaw/issues) with the log lines.
 
@@ -129,7 +134,7 @@ If the old gateway ran `:latest`, `latest` now means a different image. Give the
 
 If the NanoClaw update itself is being rolled back, also pin `@onecli-sh/sdk` back to its previous version in `package.json` and run `pnpm install`. Stored secrets survive in both directions. Access settings may not: grants and policies changed on the newer gateway are not carried back, so check that agents still get their credentials after a rollback.
 
-**Rolling back from 1.44 or later to 1.43 or older needs the backup from step 2.** Without it, the old gateway starts with a `policy_rule_identities.agent_group_id does not exist` error, and every agent the upgrade converted is left in `selective` mode with an empty secret list, so it gets no credentials (tested from 1.45.0 to 1.42.0). Restore the backup into a new, empty database. If you have no backup, put each NanoClaw agent back in `all` mode on the old gateway with `onecli agents set-secret-mode --id <agent-id> --mode all`, and check that it gets its credentials again.
+**Rolling back from 1.44 or later to 1.43 or older needs the backup from step 2; restoring it is the only supported rollback.** The upgrade migrates the database in ways the old gateway cannot read: without the backup, it starts with a `policy_rule_identities.agent_group_id does not exist` error, and every agent the upgrade converted is left in `selective` mode with an empty secret list, so it gets no credentials (tested from 1.45.0 to 1.42.0). Restore the backup into a new, empty database. Switching agents back to `all` mode without it (`onecli agents set-secret-mode`) brings back credential injection only: the deleted rules stay deleted, policy stays broken, and an agent that was `selective` before the upgrade would receive every matching secret, so it is not supported.
 
 ## The CLI binary (`onecli-cli` pin)
 
