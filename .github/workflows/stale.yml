@@ -15,14 +15,15 @@
 # loud and gave a deadline.
 #
 # Timings: 21 days of silence marks an item stale. A stale issue closes 14 days
-# later (35 total), a stale PR 21 days later (42 total). remove-stale-when-
-# updated is on, so any reply, commit, or comment clears the label and restarts
-# the clock. Closes use the not_planned reason, which renders as "not planned"
-# rather than "completed" and keeps these out of resolved metrics.
+# later (35 total), a stale PR 21 days later (42 total). A comment on a stale
+# item removes both `stale` and its triage/* label, so once the author answers
+# the item leaves the population. A push alone does not count: the action reads
+# issue events, and commits are not among them. Closes use the not_planned
+# reason, which renders as "not planned" rather than "completed".
 #
 # Escape hatches, in order of how often they should be reached for:
-#   - reply to the item                -> label comes off automatically
-#   - remove the triage/* label        -> item leaves the population entirely
+#   - comment on the item              -> item leaves the population
+#   - remove the triage/* label        -> item leaves the population
 #   - add triage/keep                  -> permanent exemption, no argument
 #
 # ---------------------------------------------------------------------------
@@ -41,6 +42,9 @@
 #   2. Confirm triage/keep is on anything a maintainer wants frozen, so the
 #      escape hatch is in place on day one rather than after the first
 #      complaint.
+#   3. Make an author reply remove the triage/* label before the item is ever
+#      marked. This workflow only clears it after the stale mark, so without
+#      that an author who answered and got no reply from us would be closed.
 # Volume can only grow as fast as triage applies the two trigger labels, which
 # is to say never faster than a human reading the item first.
 # ---------------------------------------------------------------------------
@@ -80,6 +84,9 @@ jobs:
           stale-issue-label: 'stale'
           stale-pr-label: 'stale'
           remove-stale-when-updated: true
+          # An answer puts the ball back in our court, so the item leaves the
+          # population instead of starting another countdown.
+          labels-to-remove-when-unstale: 'triage/needs-repro,triage/needs-author'
           close-issue-reason: 'not_planned'
 
           # Never touch a contributor's branch. This is also the default; it is
@@ -120,27 +127,28 @@ jobs:
 
           stale-pr-message: >-
             **This PR is waiting on a change from you.** A maintainer asked for something above and
-            we have not heard back, so it is now labelled `stale`. Push a commit, leave a comment,
-            or tell us you need more time. Any of those removes the label automatically. If nothing
-            arrives in 21 days we will close it, so the open queue stays an honest picture of what
-            is moving. A close here is bookkeeping, not a verdict on your work. Thank you for the
-            contribution.
+            we have not heard back, so it is now labelled `stale`. Leave a comment when you push
+            your change, or to tell us you need more time. A comment removes the label
+            automatically; a push on its own does not. If nothing arrives in 21 days we will close
+            it, so the open queue stays an honest picture of what is moving. A close here is
+            bookkeeping, not a verdict on your work. Thank you for the contribution.
 
           close-pr-message: >-
             **Closing this for now.** Nothing came back on the request above, so we are closing to
-            keep the review queue matched to what is actually moving. This is not a rejection and
-            it is not permanent. Reopen this PR whenever you pick it back up, or open a fresh one
-            against current `main`. Thank you for the work you put into it.
+            keep the review queue matched to what is actually moving. This is not a rejection. When
+            you pick it back up, open a new PR against current `main` and link this one. Thank you
+            for the work you put into it.
 
           stale-issue-message: >-
             **We still need a reproduction before this can move.** We asked above and have not heard
             back, so this is now labelled `stale`. Add the steps, your NanoClaw version, and the
-            relevant lines from `logs/nanoclaw.error.log`. That removes the label automatically.
-            Without a reproduction we will close in 14 days, because we cannot fix behaviour we
-            cannot see. Reply with the details at any point and we will reopen.
+            relevant lines from `logs/nanoclaw.error.log` in a comment. That removes the label
+            automatically. Without a reproduction we will close in 14 days, because we cannot fix
+            behaviour we cannot see. If it closes, you can open a new issue with the details at any
+            time.
 
           close-issue-message: >-
             **Closing this for now, because we could not reproduce it.** That is a limit on what we
-            can see from here, not a judgment on the report. Reply with steps, a version, and logs
-            at any time and we will reopen this issue and pick it up. Thank you for taking the time
-            to file it.
+            can see from here, not a judgment on the report. If you can reproduce it later, open a
+            new issue with steps, a version, and logs, and link this one. Thank you for taking the
+            time to file it.
