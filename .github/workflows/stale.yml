@@ -17,9 +17,9 @@
 # Timings: 21 days of silence marks an item stale. A stale issue closes 14 days
 # later (35 total), a stale PR 21 days later (42 total). A comment on a stale
 # item removes both `stale` and its triage/* label, so once the author answers
-# the item leaves the population. A push alone does not count: the action reads
-# issue events, and commits are not among them. Closes use the not_planned
-# reason, which renders as "not planned" rather than "completed".
+# the item leaves the population. A push or a review reply alone does not
+# count: the action reads issue comments and events only. Closes use the
+# not_planned reason, which renders as "not planned" rather than "completed".
 #
 # Escape hatches, in order of how often they should be reached for:
 #   - comment on the item              -> item leaves the population
@@ -37,8 +37,9 @@
 #
 # Flipping debug-only to false is the arming step and it is not reversible for
 # anything already sent. Before flipping:
-#   1. Read the most recent run's log and confirm every item it lists is
-#      genuinely author-blocked.
+#   1. Read the most recent run's log and confirm every item it would mark or
+#      close is genuinely author-blocked. The log also lists every skipped
+#      open item; those are expected.
 #   2. Confirm triage/keep is on anything a maintainer wants frozen, so the
 #      escape hatch is in place on day one rather than after the first
 #      complaint.
@@ -127,9 +128,10 @@ jobs:
 
           stale-pr-message: >-
             **This PR is waiting on a change from you.** A maintainer asked for something above and
-            we have not heard back, so it is now labelled `stale`. Leave a comment when you push
-            your change, or to tell us you need more time. A comment removes the label
-            automatically; a push on its own does not. If nothing arrives in 21 days we will close
+            we have not heard back, so it is now labelled `stale`. Leave a comment at the bottom of
+            this page when you push your change, or to tell us you need more time. That removes the
+            label automatically; a push or a review reply on its own does not. If nothing arrives
+            in 21 days we will close
             it, so the open queue stays an honest picture of what is moving. A close here is
             bookkeeping, not a verdict on your work. Thank you for the contribution.
 
