@@ -1,3 +1,3 @@
 {
-  "agent-image": "797273591697.dkr.ecr.us-east-1.amazonaws.com/nanoclaw/agent@sha256:79ac5063af36c1a77560a8aff66bc5efec8295b004fef32855a1df93fec3ea1a"
+  "agent-image": "797273591697.dkr.ecr.us-east-1.amazonaws.com/nanoclaw/agent@sha256:b23b6a4247262791f444d9afa22da64ae812d587ff09449a4e21252a26c8c5ab"
 }
