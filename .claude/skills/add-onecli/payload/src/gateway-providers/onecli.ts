@@ -5,9 +5,9 @@ import { OneCLI, ApprovalClient, type ContainerConfig, type ApprovalRequest } fr
 import { DATA_DIR } from '../config.js';
 import { combinedCaBundle, stageOnecliFile } from './onecli-files.js';
 import {
-  isSavedProviderCredentialName,
+  isSavedProviderCredential,
   readProviderCredentials,
-  recordProviderCredentials,
+  updateProviderCredentials,
 } from './onecli-provider-credentials.js';
 import { readEnvFile } from '../env.js';
 import { log } from '../log.js';
@@ -191,20 +191,27 @@ export async function grantProviderCredentials(
 
   const vault = await list('/v1/secrets');
   const live = new Set(vault.map((secret) => secret.id).filter((id): id is string => typeof id === 'string'));
-  let ids = (readProviderCredentials(dataDir)[provider] ?? []).filter((id) => live.has(id));
-  if (ids.length === 0) {
-    ids = vault
-      .filter((secret) => typeof secret.id === 'string' && isSavedProviderCredentialName(provider, secret.name))
+  let record = readProviderCredentials(dataDir);
+  if (!record.matched.includes(provider)) {
+    // Once per provider: adopt the secrets NanoClaw's setup saved before ids
+    // were recorded. On a shared gateway that includes another install's
+    // same-named login, which this install's setup already treats as its own.
+    const found = vault
+      .filter((secret) => typeof secret.id === 'string' && isSavedProviderCredential(provider, secret))
       .map((secret) => secret.id as string);
-    if (ids.length) recordProviderCredentials(dataDir, provider, ids, { replace: true });
+    record = updateProviderCredentials(dataDir, (r) => {
+      r.providers[provider] = [...new Set([...(r.providers[provider] ?? []), ...found])];
+      r.matched = [...new Set([...r.matched, provider])];
+    });
   }
+  const ids = (record.providers[provider] ?? []).filter((id) => live.has(id));
   const missing = ids.filter((id) => !held.has(id));
   for (const id of missing) {
     const res = await request(`${agentPath}/grants/secrets/${encodeURIComponent(id)}`, 'PUT');
     if (!res.ok) throw new Error(`attaching secret ${id} returned ${res.status}`);
   }
   if (ids.length === 0) {
-    log.warn('No model credential is recorded for this provider; the agent group gets none', {
+    log.warn('No model credential is recorded for this provider; the group gets none until its login is run again', {
       agentGroupId: identifier,
       provider,
     });

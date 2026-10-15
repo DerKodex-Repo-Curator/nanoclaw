@@ -100,6 +100,13 @@ describe('/add-vercel OneCLI steps', () => {
     expect(lines.some((l) => l.includes('attach-secret'))).toBe(false);
   });
 
+  it('a re-run with the secret already stored still goes through group selection', () => {
+    const doc = fs.readFileSync(path.join(SKILL_DIR, 'SKILL.md'), 'utf8');
+    const skip = doc.split('\n').find((l) => l.startsWith('If a Vercel credential already exists'));
+    expect(skip).toContain('#attach-the-secret-to-the-groups-that-use-vercel');
+    expect(skip).not.toMatch(/Phase 4/);
+  });
+
   it('removal detaches the Vercel secret from every agent, then deletes it', () => {
     const { lines } = run(DETACH);
     for (const id of ['oc-default', 'oc-sales', 'oc-ops'])

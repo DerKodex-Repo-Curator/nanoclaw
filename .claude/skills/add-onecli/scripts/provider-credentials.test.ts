@@ -424,7 +424,7 @@ describe('gateway seam adapter', () => {
   it('records the saved or kept id under the target provider, and nothing without one', async () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'provider-record-'));
     const record = () =>
-      JSON.parse(fs.readFileSync(path.join(root, 'data', 'onecli', 'provider-credentials.json'), 'utf8'));
+      JSON.parse(fs.readFileSync(path.join(root, 'data', 'onecli', 'provider-credentials.json'), 'utf8')).providers;
     try {
       let rows: unknown[] = [];
       gateway(() => rows);

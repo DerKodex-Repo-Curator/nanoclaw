@@ -53,7 +53,7 @@ head -5 container/skills/vercel-cli/SKILL.md
 onecli secrets list --max 0 2>/dev/null | grep -i vercel
 ```
 
-If a Vercel credential already exists, skip to Phase 4.
+If a Vercel credential already exists, skip to [Attach the secret to the groups that use Vercel](#attach-the-secret-to-the-groups-that-use-vercel): a re-run still asks which groups get it.
 
 ### Set up Vercel API credential
 

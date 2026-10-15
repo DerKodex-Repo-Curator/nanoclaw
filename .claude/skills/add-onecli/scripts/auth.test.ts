@@ -17,7 +17,7 @@ import { run } from './auth.js';
 
 let root: string;
 const record = () =>
-  JSON.parse(fs.readFileSync(path.join(root, 'data', 'onecli', 'provider-credentials.json'), 'utf8'));
+  JSON.parse(fs.readFileSync(path.join(root, 'data', 'onecli', 'provider-credentials.json'), 'utf8')).providers;
 beforeEach(() => {
   root = fs.mkdtempSync(path.join(os.tmpdir(), 'onecli-auth-'));
   vi.spyOn(process, 'cwd').mockReturnValue(root);
@@ -54,4 +54,21 @@ it('records the Anthropic secret a subscription sign-in saved', async () => {
   await run();
   expect(child.exec.mock.calls.every(([, args]) => args.includes('--max') && args.includes('0'))).toBe(true);
   expect(record()).toEqual({ claude: ['sec-sub'] });
+});
+
+it('an already connected Claude key is recorded, and an OpenCode Anthropic key does not count as connected', async () => {
+  child.exec.mockReturnValueOnce(
+    JSON.stringify({ data: [{ id: 'sec-dash', name: 'Claude from the dashboard', type: 'anthropic' }] }),
+  );
+  await run();
+  expect(record()).toEqual({ claude: ['sec-dash'] });
+  expect(prompts.select).not.toHaveBeenCalled();
+  fs.rmSync(path.join(root, 'data'), { recursive: true });
+  child.exec.mockReturnValueOnce(
+    JSON.stringify({ data: [{ id: 'sec-oc', name: 'OpenCode anthropic', type: 'generic' }] }),
+  );
+  prompts.select.mockResolvedValueOnce('skip');
+  await run();
+  expect(prompts.select).toHaveBeenCalledOnce();
+  expect(fs.existsSync(path.join(root, 'data'))).toBe(false);
 });

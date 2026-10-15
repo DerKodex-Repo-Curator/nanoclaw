@@ -8,7 +8,8 @@ import * as p from '@clack/prompts';
 
 import {
   createdSecretId,
-  isSavedProviderCredentialName,
+  isSavedProviderCredential,
+  readProviderCredentials,
   recordProviderCredentials,
 } from '../payload/src/gateway-providers/onecli-provider-credentials.js';
 
@@ -34,20 +35,29 @@ function listSecrets(): SecretRow[] {
   return (Array.isArray(parsed) ? parsed : parsed.data) ?? [];
 }
 
+const dataDir = () => path.join(process.cwd(), 'data');
+
+// Connected means Claude groups will be granted a credential: a live recorded
+// one, or one saved under NanoClaw's name or type, which is then recorded.
 function hasAnthropicSecret(): boolean {
+  let secrets: SecretRow[];
   try {
-    return listSecrets().some((secret) => secret.type === 'anthropic' || /anthropic/i.test(secret.name ?? ''));
+    secrets = listSecrets();
   } catch {
     return false;
   }
+  const recorded = new Set(readProviderCredentials(dataDir()).providers.claude ?? []);
+  const ids = secrets.flatMap((s) =>
+    s.id && (recorded.has(s.id) || isSavedProviderCredential('claude', s)) ? [s.id] : [],
+  );
+  if (ids.length) recordProviderCredentials(dataDir(), 'claude', ids);
+  return ids.length > 0;
 }
 
 // New groups get only the recorded model credential, so record what was saved.
 function recordClaudeSecret(id: string | null): void {
-  const ids = id
-    ? [id]
-    : listSecrets().flatMap((s) => (isSavedProviderCredentialName('claude', s.name) && s.id ? [s.id] : []));
-  if (ids.length) recordProviderCredentials(path.join(process.cwd(), 'data'), 'claude', ids);
+  const ids = id ? [id] : listSecrets().flatMap((s) => (s.id && isSavedProviderCredential('claude', s) ? [s.id] : []));
+  if (ids.length) recordProviderCredentials(dataDir(), 'claude', ids);
 }
 
 function saveSecret(value: string, baseUrl?: string): void {

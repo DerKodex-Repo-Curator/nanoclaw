@@ -342,7 +342,7 @@ describe('OneCLI gateway package', () => {
     await expect(grant(gateway)).resolves.toEqual(['sec-model']);
   });
 
-  it('an install with no record matches the names NanoClaw saved once, then records them', async () => {
+  it('an install with no record matches the secrets NanoClaw saved once per provider, then records them', async () => {
     const gateway = fakeGateway({
       vault: [
         { id: 'sec-model', name: 'Anthropic' },
@@ -353,17 +353,43 @@ describe('OneCLI gateway package', () => {
     });
     await expect(grant(gateway)).resolves.toEqual(['sec-model']);
     await expect(grant(gateway, 'opencode')).resolves.toEqual(['sec-oc']);
-    expect(readRecord(data)).toEqual({ claude: ['sec-model'], opencode: ['sec-oc'] });
+    expect(readRecord(data)).toEqual({
+      providers: { claude: ['sec-model'], opencode: ['sec-oc'] },
+      matched: ['claude', 'opencode'],
+    });
   });
 
-  it('a recorded id whose secret was deleted is replaced by the saved-name match', async () => {
-    writeRecord(data, { codex: ['sec-gone'] });
-    const gateway = fakeGateway({ vault: [{ id: 'sec-codex-2', name: 'Codex' }] });
-    await expect(grant(gateway, 'codex')).resolves.toEqual(['sec-codex-2']);
-    expect(readRecord(data)).toEqual({ codex: ['sec-codex-2'] });
+  it('matches typed model keys too: a dashboard-named Anthropic key, and a ChatGPT login for Codex', async () => {
+    const gateway = fakeGateway({
+      vault: [
+        { id: 'sec-claude', name: 'My Claude key', type: 'anthropic' },
+        { id: 'sec-chatgpt', name: 'OpenCode ChatGPT', type: 'openai' },
+        { id: 'sec-oc-anthropic', name: 'OpenCode anthropic', type: 'generic' },
+      ],
+    });
+    await expect(grant(gateway)).resolves.toEqual(['sec-claude']);
+    await expect(grant(gateway, 'codex')).resolves.toEqual(['sec-chatgpt']);
   });
 
-  it('a recorded live id wins over a same-provider name match (no widening on rename)', async () => {
+  it('matches by name only once: after this install’s credential is deleted, another same-named one is not adopted', async () => {
+    writeRecord(data, { claude: ['sec-gone'] });
+    const gateway = fakeGateway({ vault: [{ id: 'sec-other', name: 'Anthropic' }] });
+    await expect(grant(gateway)).resolves.toEqual([]);
+    expect(readRecord(data)).toEqual({ providers: { claude: ['sec-gone'] }, matched: ['claude'] });
+  });
+
+  it('unions the one-time match with ids a login recorded before the first spawn', async () => {
+    writeRecord(data, { opencode: ['sec-oc'] }, []);
+    const gateway = fakeGateway({
+      vault: [
+        { id: 'sec-oc', name: 'OpenCode openrouter' },
+        { id: 'sec-chatgpt', name: 'OpenCode ChatGPT', type: 'openai' },
+      ],
+    });
+    await expect(grant(gateway, 'opencode')).resolves.toEqual(['sec-oc', 'sec-chatgpt']);
+  });
+
+  it('after the one-time match, only recorded ids count (a renamed or new same-named secret adds nothing)', async () => {
     writeRecord(data, { codex: ['sec-codex'] });
     const gateway = fakeGateway({
       vault: [
@@ -387,7 +413,7 @@ describe('OneCLI gateway package', () => {
   it('refuses to guess when the record file is unreadable', async () => {
     fs.mkdirSync(path.join(data, 'onecli'), { recursive: true });
     fs.writeFileSync(path.join(data, 'onecli', 'provider-credentials.json'), '{"claude": "sec-model"}');
-    await expect(grant(fakeGateway())).rejects.toThrow(/must map provider names/);
+    await expect(grant(fakeGateway())).rejects.toThrow(/must hold provider names/);
   });
 
   it('attaches nothing and records nothing on a gateway without the grants API, where agents are in all mode', async () => {
@@ -592,9 +618,10 @@ const DEFAULT_VAULT = [
   { id: 'sec-dial', name: 'Dial' },
 ];
 
-function writeRecord(dataDir: string, record: Record<string, string[]>): void {
+/** Writes a record; providers listed in `matched` (default: all of them) are past their one-time name match. */
+function writeRecord(dataDir: string, providers: Record<string, string[]>, matched = Object.keys(providers)): void {
   fs.mkdirSync(path.join(dataDir, 'onecli'), { recursive: true, mode: 0o700 });
-  fs.writeFileSync(path.join(dataDir, 'onecli', 'provider-credentials.json'), JSON.stringify(record));
+  fs.writeFileSync(path.join(dataDir, 'onecli', 'provider-credentials.json'), JSON.stringify({ providers, matched }));
 }
 
 function readRecord(dataDir: string): unknown {
@@ -609,7 +636,7 @@ function fakeGateway(
     putDelayMs?: number;
     /** Secret ids the group's agent (oc-g1) already holds. */
     held?: string[];
-    vault?: Array<{ id: string; name: string }>;
+    vault?: Array<{ id: string; name: string; type?: string }>;
   } = {},
 ) {
   const calls: string[] = [];

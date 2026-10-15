@@ -167,7 +167,7 @@ describe('OneCLI upgrade guide: save commands', () => {
 // that prints the given draft/published rules and project default.
 describe('OneCLI upgrade guide: pre-upgrade check', () => {
   const guide = fs.readFileSync(GUIDE, 'utf8');
-  const checkLines = guide.split('\n').filter((l) => l.startsWith('(found=0; for st in draft published;'));
+  const checkLines = guide.split('\n').filter((l) => l.startsWith('(export ONECLI_API_HOST='));
 
   type Rule = Record<string, unknown>;
   const rule = (over: Rule = {}): Rule => ({
@@ -185,9 +185,11 @@ describe('OneCLI upgrade guide: pre-upgrade check', () => {
     rules?: Rule[];
     published?: Rule[];
     def?: string;
+    defRaw?: string;
     fail?: string;
     raw?: string;
     hint?: boolean;
+    gw?: string | null;
   }) {
     const bin = path.join(home, 'bin');
     fs.mkdirSync(bin, { recursive: true });
@@ -197,10 +199,14 @@ describe('OneCLI upgrade guide: pre-upgrade check', () => {
     };
     fs.writeFileSync(path.join(home, 'draft.json'), opts.raw ?? rules('draft'));
     fs.writeFileSync(path.join(home, 'published.json'), opts.raw ?? rules('published'));
-    fs.writeFileSync(path.join(home, 'default.json'), JSON.stringify({ isDefault: true, action: opts.def ?? 'allow' }));
+    fs.writeFileSync(
+      path.join(home, 'default.json'),
+      opts.defRaw ?? JSON.stringify({ isDefault: true, action: opts.def ?? 'allow' }),
+    );
     fs.writeFileSync(
       path.join(bin, 'onecli'),
       `#!/bin/sh
+echo "$ONECLI_API_HOST $*" >> "${home}/onecli.log"
 case "$1 $2 $3" in
   "policy rules list") [ "${opts.fail ?? ''}" = rules ] && { echo '{"error":"unauthorized"}' >&2; exit 1; }; cat "${home}/$5.json" ;;
   "policy default get") [ "${opts.fail ?? ''}" = default ] && exit 1; cat "${home}/default.json" ;;
@@ -209,8 +215,9 @@ esac
 `,
       { mode: 0o755 },
     );
+    const gw = opts.gw === undefined ? 'http://172.17.0.1:10254' : opts.gw;
     return spawnSync('sh', ['-c', checkLines[0]], {
-      env: { PATH: `${bin}:${process.env.PATH ?? ''}`, HOME: home },
+      env: { PATH: `${bin}:${process.env.PATH ?? ''}`, HOME: home, ...(gw === null ? {} : { GW: gw }) },
       encoding: 'utf8',
     });
   }
@@ -255,6 +262,17 @@ esac
     expect(r.stdout).toContain(`rule: ${String(finding.action)}  ${String(finding.name)}`);
   });
 
+  it('asks the gateway being upgraded ($GW), and stops before any call when GW is unset', () => {
+    expect(check({ gw: 'http://gw.example:10254' }).status).toBe(0);
+    const log = fs.readFileSync(path.join(home, 'onecli.log'), 'utf8').trim().split('\n');
+    expect(log.every((l) => l.startsWith('http://gw.example:10254 policy '))).toBe(true);
+    fs.rmSync(path.join(home, 'onecli.log'));
+    const r = check({ gw: null });
+    expect(r.status).not.toBe(0);
+    expect(r.stdout).not.toContain('OK:');
+    expect(fs.existsSync(path.join(home, 'onecli.log'))).toBe(false);
+  });
+
   it('stops on a block project default', () => {
     const r = check({ def: 'block' });
     expect(r.status).toBe(1);
@@ -271,6 +289,11 @@ esac
     ['the rules list fails', { fail: 'rules' }],
     ['the default read fails', { fail: 'default' }],
     ['the output is not JSON', { raw: 'Unauthorized' }],
+    ['the rules output is empty', { raw: '' }],
+    ['the rules output is not a list', { raw: '{"error":"x"}' }],
+    ['the default is empty', { defRaw: '' }],
+    ['the default is null', { defRaw: 'null' }],
+    ['the default has no action', { defRaw: '{}' }],
   ])('stops, never reports OK, when %s', (_name, opts) => {
     const r = check(opts);
     expect(r.status).not.toBe(0);

@@ -28,9 +28,24 @@ it('passes API credentials in a private temporary file, never in argv, and remov
   await createCredentialStore().save('codex', { kind: 'api-key', value: 'fixture-key' });
   expect(fs.existsSync(file)).toBe(false);
 });
-it('recognizes existing OpenAI secrets and fails explicitly when the selected vault is unavailable', async () => {
-  exec.mockReturnValue(JSON.stringify({ data: [{ type: 'openai' }] }));
-  expect(await createCredentialStore().has('codex')).toBe(true);
+it('counts only credentials Codex groups will be granted, records them, and fails explicitly without a vault', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-has-'));
+  const record = () =>
+    JSON.parse(fs.readFileSync(path.join(root, 'data', 'onecli', 'provider-credentials.json'), 'utf8')).providers;
+  try {
+    // OpenCode's API key on the OpenAI host is not Codex's: Codex setup must still sign in.
+    exec.mockReturnValueOnce(JSON.stringify({ data: [{ id: 'sec-oc', name: 'OpenCode openai', type: 'generic' }] }));
+    expect(await createCredentialStore(root).has('codex')).toBe(false);
+    // A ChatGPT login (typed openai) is granted to Codex groups, so a retried login records it.
+    exec.mockReturnValueOnce(
+      JSON.stringify({ hint: 'h', data: [{ id: 'sec-chatgpt', name: 'OpenCode ChatGPT', type: 'openai' }] }),
+    );
+    expect(await createCredentialStore(root).has('codex')).toBe(true);
+    expect(record()).toEqual({ codex: ['sec-chatgpt'] });
+    expect(exec.mock.calls.every(([, args]) => args.join(' ') === 'secrets list --max 0')).toBe(true);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
   exec.mockImplementation(() => {
     throw new Error('fixture-private-error');
   });
@@ -42,7 +57,7 @@ it('records the created Codex secret id so Codex groups are granted it, and only
   try {
     exec.mockReturnValueOnce('{\n  "hint": "attach it",\n  "id": "sec-codex"\n}');
     await createCredentialStore(root).save('codex', { kind: 'api-key', value: 'fixture-key' });
-    expect(JSON.parse(fs.readFileSync(file, 'utf8'))).toEqual({ codex: ['sec-codex'] });
+    expect(JSON.parse(fs.readFileSync(file, 'utf8')).providers).toEqual({ codex: ['sec-codex'] });
     fs.rmSync(path.join(root, 'data'), { recursive: true });
     exec.mockReturnValueOnce('not json');
     await createCredentialStore(root).save('codex', { kind: 'api-key', value: 'fixture-key' });

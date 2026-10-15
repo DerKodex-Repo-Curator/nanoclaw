@@ -56,9 +56,12 @@ NanoClaw records the id of each model credential its provider setup saves (setup
 Claude key, `/add-codex`, `/add-opencode`) in `data/onecli/provider-credentials.json`,
 by provider. On every spawn it attaches the recorded credentials for the provider
 the group runs, if the agent does not hold them yet; this also covers a new group,
-a group that switched provider, and a login saved after the group existed. An
-install that saved credentials before ids were recorded is matched once by the
-names NanoClaw gives them (`Anthropic`, `Codex`, `OpenCode …`).
+a group that switched provider, and a login saved after the group existed. For
+an install that saved credentials before ids were recorded, the first spawn per
+provider also adopts, once, the secrets NanoClaw's setup saves by name or type
+(`Anthropic` or a typed `anthropic` key; `Codex` or a typed `openai` login;
+`OpenCode …`). After that only recorded ids count: a re-run of the provider's
+login records a credential it finds or saves.
 
 Every other secret and every app connection is opt-in: the skill that adds it
 attaches it to the groups you choose, and new groups do not get it. To grant one
