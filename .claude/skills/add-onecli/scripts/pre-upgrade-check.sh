@@ -1,18 +1,19 @@
 #!/bin/sh
 # Lists what OneCLI's one-time grant conversion (first start of 1.44+) deletes
 # or changes, for docs/onecli-upgrades.md. Exit 0: nothing; 1: findings;
-# 2: the policy could not be read. Asks the gateway at $GW.
+# 2: the policy could not be read. Asks the gateway at $GW, one project at a
+# time (1.42 cannot list projects): ONECLI_PROJECT selects one, else the CLI's.
 set -u
 : "${GW:?set GW to the gateway address, as in the Detect step}"
 export ONECLI_API_HOST="$GW"
-echo "Checking the policy at $GW"
+echo "Checking the policy at $GW, project ${ONECLI_PROJECT:-default}"
 stop() { echo "STOP: $1; do not upgrade" >&2; exit 2; }
 LIST='if type == "array" then . elif (type == "object") and ((.data | type) == "array") then .data else error("not a rule list") end'
 found=0
 for st in draft published; do
   r=$(onecli policy rules list --status "$st") && [ -n "$r" ] || stop "could not read the $st rules"
   d=$(onecli policy default get --status "$st") && [ -n "$d" ] || stop "could not read the $st default"
-  hits=$(printf '%s' "$r" | jq -r "($LIST)"'[] | select((.isDefault | not) and ((.source == "blocklist") | not)) | select(any(.targets[]?; .kind == "network") or (((.conditions | type) == "array") and ((.conditions | length) > 0)) or ((.action == "allow") and ((.rateLimit == null) | not))) | "rule: \(.action)  \(.name)"') || stop "could not parse the $st rules"
+  hits=$(printf '%s' "$r" | jq -r "($LIST)"'[] | select((.isDefault | not) and ((.source == "blocklist") | not)) | select(any(.targets[]?; .kind == "network") or (((.conditions | type) == "array") and ((.conditions | length) > 0)) or ((.action == "allow") and ((.rateLimit == null) | not)) or (any(.targets[]?; .kind == "secret") and ((.action != "allow") or (.requireApproval == true)))) | "rule: \(.action)  \(.name)"') || stop "could not parse the $st rules"
   act=$(printf '%s' "$d" | jq -er 'if (type == "object") and ((.action | type) == "string") then .action else error("no default action") end') || stop "could not parse the $st default"
   same=$(printf '%s' "$r" | jq -c "($LIST) | map(del(.id, .status, .generation, .createdAt) | tojson) | sort") || stop "could not parse the $st rules"
   if [ "$st" = draft ]; then draft="$same $act"; else published="$same $act"; fi

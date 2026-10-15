@@ -34,14 +34,16 @@ The gateway runs as a Docker service in `~/.onecli`. Upgrade just that container
 **First, if the gateway runs 1.43 or older and the pin is 1.44 or later, check what the move deletes.** Do this before anything below writes the pin. On its first start a 1.44+ gateway converts the project once:
 
 - Each `all`-mode agent gets an explicit grant for **every** secret in the vault at that moment. Agents already in `selective` mode keep their list.
-- Every custom project **network rule and behavioral rule** (one with a non-empty `conditions` list) is **deleted**, including `block` rules: an agent a rule kept away from a host now receives that host's secret. **Rate limits on allow rules** are dropped, and a **`block` project default is reset to `allow`**.
+- Every custom project **network rule and behavioral rule** (one with a non-empty `conditions` list) is **deleted**, including `block` rules: an agent a rule kept away from a host now receives that host's secret. So are **block and approval rules on a secret**: an `all`-mode agent gets a plain grant for it. **Rate limits on allow rules** are dropped, and a **`block` project default is reset to `allow`**.
 - `onecli agents set-secrets`, `onecli agents secrets` and `onecli agents set-secret-mode` answer `410 Gone` afterwards. Use `onecli agents grants list|attach-secret|detach-secret`.
 
 The check needs CLI 2.6 or later for `policy rules`: install the `onecli-cli` pin first ([below](#the-cli-binary-onecli-cli-pin)); it works against the old gateway. Run it from the NanoClaw checkout, with `GW` set as in the Detect step (it only reads the gateway's API; if NanoClaw's `.env` sets `ONECLI_PROJECT_ID`, also `export ONECLI_PROJECT=<that id>`). It reads the draft (what the conversion folds) and the published rules, and exits non-zero when it finds something the conversion deletes or changes, when the draft has unpublished changes (the conversion publishes the draft), or when it cannot read the policy:
 
 ```bash
-sh .claude/skills/add-onecli/scripts/pre-upgrade-check.sh
+GW="$GW" sh .claude/skills/add-onecli/scripts/pre-upgrade-check.sh
 ```
+
+The conversion runs for every project on the gateway. A local gateway has one; if yours has more, run the check once per project with `ONECLI_PROJECT=<project id>` in front.
 
 If it stops with findings, do not upgrade yet: after the upgrade, access can only be narrowed by detaching secrets from agents, so anything a rule, a rate limit or a `block` default enforced is gone. Note what each finding protects, and upgrade only once you accept that or have a replacement. Also check for `/add-dial-tool`, which keeps unchosen agents away from Dial with a `block` rule named `Dial: blocked agents`:
 

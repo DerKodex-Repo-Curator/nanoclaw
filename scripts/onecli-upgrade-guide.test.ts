@@ -167,7 +167,7 @@ describe('OneCLI upgrade guide: save commands', () => {
 // that prints the given draft/published rules and project default.
 describe('OneCLI upgrade guide: pre-upgrade check', () => {
   const guide = fs.readFileSync(GUIDE, 'utf8');
-  const CHECK = 'sh .claude/skills/add-onecli/scripts/pre-upgrade-check.sh';
+  const CHECK = 'GW="$GW" sh .claude/skills/add-onecli/scripts/pre-upgrade-check.sh';
   const SCRIPT = path.resolve(__dirname, '../.claude/skills/add-onecli/scripts/pre-upgrade-check.sh');
 
   type Rule = Record<string, unknown>;
@@ -236,6 +236,7 @@ esac
         rule({ name: 'empty conditions', conditions: [] }),
         rule({ name: 'blocked host', source: 'blocklist', targets: [{ kind: 'network', hostPattern: 'x.test' }] }),
         rule({ name: 'block with limit', action: 'block', rateLimit: 5 }),
+        rule({ name: 'plain secret allow', targets: [{ kind: 'secret', secretId: 's1' }] }),
       ],
     });
     expect(r.status).toBe(0);
@@ -256,10 +257,33 @@ esac
       rule({ name: 'only weekdays', conditions: [{ field: 'time', op: 'in', value: 'weekdays' }] }),
     ],
     ['an allow rule with a rate limit', rule({ name: 'limited', rateLimit: 10 })],
+    [
+      'a block rule on a secret',
+      rule({ name: 'no openai key', action: 'block', targets: [{ kind: 'secret', secretId: 's1' }] }),
+    ],
+    [
+      'an approval rule on a secret',
+      rule({ name: 'ask first', requireApproval: true, targets: [{ kind: 'secret', secretId: 's1' }] }),
+    ],
   ])('stops on %s', (_name, finding) => {
     const r = check({ rules: [rule(), finding] });
     expect(r.status).toBe(1);
     expect(r.stdout).toContain(`rule: ${String(finding.action)}  ${String(finding.name)}`);
+  });
+
+  it('the guide hands the Detect step’s unexported GW to the script', () => {
+    const r = spawnSync(
+      'sh',
+      [
+        '-c',
+        `GW=http://from-detect.test:1; ${CHECK.replace('sh .claude', `sh ${path.resolve(__dirname, '..')}/.claude`)}`,
+      ],
+      {
+        env: { PATH: `${path.join(home, 'bin')}:${process.env.PATH ?? ''}`, HOME: home },
+        encoding: 'utf8',
+      },
+    );
+    expect(r.stdout).toContain('Checking the policy at http://from-detect.test:1');
   });
 
   it('asks the gateway being upgraded ($GW), and stops before any call when GW is unset', () => {
