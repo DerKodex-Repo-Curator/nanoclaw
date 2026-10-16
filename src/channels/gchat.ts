@@ -21,10 +21,13 @@ const GCHAT_DEFAULTS: ChannelDefaults = {
 
 registerChannelAdapter('gchat', {
   factory: () => {
-    const env = readEnvFile(['GCHAT_CREDENTIALS']);
+    const env = readEnvFile(['GCHAT_CREDENTIALS', 'GCHAT_BOT_USER_ID']);
     if (!env.GCHAT_CREDENTIALS) return null;
     const gchatAdapter = createGoogleChatAdapter({
       credentials: JSON.parse(env.GCHAT_CREDENTIALS),
+      // Adapters >= 4.40 no longer learn their own id from mentions; without
+      // it, @mentions in spaces never count as mentions.
+      botUserId: env.GCHAT_BOT_USER_ID || undefined,
     });
     return createChatSdkBridge({
       adapter: gchatAdapter,
