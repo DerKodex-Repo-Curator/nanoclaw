@@ -103,10 +103,11 @@ import './codex.js';
 The agent's global Node CLIs install from `container/cli-tools.json` (a json-merge seam), not hand-edited Dockerfile layers. Add Codex by appending one entry — idempotent on `name`, so a re-run is a no-op. `@openai/codex` has no native postinstall, so no `onlyBuilt`. The Dockerfile already installs every manifest entry via pinned `pnpm install -g`; no Dockerfile edit is needed.
 
 ```nc:json-merge into:container/cli-tools.json key:name
-{ "name": "@openai/codex", "version": "0.162.1" }
+{ "name": "@openai/codex", "version": "0.155.1" }
 ```
 
-The version (`0.162.1`) is the canonical pin — this SKILL.md is the source of truth.
+The version (`0.155.1`) is the canonical pin — this SKILL.md is the source of truth.
+Codex 0.156.0 and later require the auth file's account id to match a real ChatGPT workspace. Gateway stand-ins carry a placeholder id, so a subscription login fails with "selected workspace missing from routing discovery". Keep 0.155.1 until stand-ins carry the real workspace id.
 
 ### 4. Build
 
