@@ -63,6 +63,10 @@ describe('classifyPingResult', () => {
     expect(classifyPingResult(0, 'Not logged in · Please run /login')).toBe('auth_error');
   });
 
+  it('detects the notice for a bad external auth token', () => {
+    expect(classifyPingResult(4, 'Invalid auth token · Fix external auth token')).toBe('auth_error');
+  });
+
   it('preserves socket errors', () => {
     expect(classifyPingResult(2, '')).toBe('socket_error');
   });
@@ -138,6 +142,10 @@ describe('ping outcome from raw chat-client lines', () => {
     expect(pingOutcome(4, raw('Invalid API key · Please run /login', true).toString(), '')).toEqual({
       result: 'auth_error',
       detail: 'Invalid API key · Please run /login',
+    });
+    expect(pingOutcome(4, raw('Invalid auth token · Fix external auth token', true).toString(), '')).toEqual({
+      result: 'auth_error',
+      detail: 'Invalid auth token · Fix external auth token',
     });
   });
 

@@ -60,6 +60,7 @@ const AUTH_ERROR_PATTERNS = [
   /Please run \/login/i,
   /Not logged in/i,
   /Invalid API key/i,
+  /Invalid auth token/i,
 ];
 
 export function classifyPingResult(exitCode: number | null, stdout: string, stderr = ''): PingResult {
