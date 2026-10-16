@@ -110,8 +110,8 @@ function appContextKey(instance: string, channelId: string, userId: string): str
 
 /**
  * Derive ordered entities from an SDK assistant event. The installed chat
- * core (4.41.1) parses assistant_thread_started / app_context_changed into a
- * `context` object (channelId/teamId/threadEntryPoint — the legacy assistant
+ * core (4.41.1) parses assistant_thread_started /
+ * assistant_thread_context_changed into a `context` object (channelId/teamId/threadEntryPoint — the legacy assistant
  * context shape) with no entities array; prefer a real `entities` array
  * whenever a future SDK forwards the platform's ordered agent-context
  * entities.
@@ -661,8 +661,9 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
 
       // Agent-mode assistant context: cache the latest "what the user is
       // viewing" per (channel, user). The installed chat core (4.41.1)
-      // dispatches both the legacy assistant_thread_started and the
-      // agent_view app_context_changed events into these handlers.
+      // dispatches assistant_thread_started and
+      // assistant_thread_context_changed into these handlers. Agent-view
+      // app_context_changed goes to onAppContextChanged, not registered here.
       const rememberAppContext = (event: AssistantThreadStartedEvent | AssistantContextChangedEvent): void => {
         cacheAppContext(instanceKey, event.channelId, event.userId, appContextEntities(event));
       };
