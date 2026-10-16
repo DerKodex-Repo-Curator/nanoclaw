@@ -18,9 +18,8 @@
  * `cursor.gateway-proxy.test.ts`.
  *
  * This module never imports the runtime contract (provider-contracts/cursor.ts):
- * registration is two-step, so it compiles and runs on a core that predates the
- * contract seam. The contract attaches itself through registerProviderContract
- * and reuses the section functions exported here.
+ * registration is two-step. The contract attaches itself through
+ * registerProviderContract and reuses the section functions exported here.
  */
 import { randomUUID } from 'crypto';
 import fs from 'fs';
@@ -41,7 +40,7 @@ import type {
 } from '@cursor/sdk';
 
 import { memoryContextForSessionStart, type MemorySessionHookRegistration } from '../memory/session-hook.js';
-import { archiveProviderExchange } from './exchange-archive.js';
+import { archiveProviderExchange } from '../provider-contracts/exchange-archive.js';
 import { registerProvider } from './provider-registry.js';
 import type {
   AgentProvider,
