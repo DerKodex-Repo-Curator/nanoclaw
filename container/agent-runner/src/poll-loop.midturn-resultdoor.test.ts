@@ -4,6 +4,7 @@ import { initTestSessionDb, closeSessionDb, getInboundDb, getOutboundDb } from '
 import { getUndeliveredMessages, writeMessageOut } from './db/messages-out.js';
 import { buildInformedWrapNudge, processQuery } from './poll-loop.js';
 import type { AgentQuery, ProviderEvent, ProviderExchange } from './providers/types.js';
+import { GENERIC_FAILURE_NOTICE } from './formatter.js';
 
 // Adversarial verification of the one-door contract for mid-turn delivery
 // providers: mid-turn streaming is the SINGLE content door. The result door
@@ -257,9 +258,7 @@ describe('error and interrupted turns', () => {
       true,
     );
 
-    expect(deliveredTexts()).toEqual([
-      "Sorry, something went wrong and I couldn't answer. Whoever runs this NanoClaw can look into it using the logs: https://docs.nanoclaw.dev/operate/troubleshooting#start-here",
-    ]);
+    expect(deliveredTexts()).toEqual([GENERIC_FAILURE_NOTICE]);
     expect(pushes).toHaveLength(0);
     expect(exchanges).toHaveLength(1);
     expect(exchanges[0].status).toBe('error');
@@ -298,10 +297,7 @@ describe('error and interrupted turns', () => {
       true,
     );
 
-    expect(deliveredTexts()).toEqual([
-      'Sent before failure.',
-      "Sorry, something went wrong and I couldn't answer. Whoever runs this NanoClaw can look into it using the logs: https://docs.nanoclaw.dev/operate/troubleshooting#start-here",
-    ]);
+    expect(deliveredTexts()).toEqual(['Sent before failure.', GENERIC_FAILURE_NOTICE]);
     expect(pushes).toHaveLength(0);
     expect(exchanges).toHaveLength(1);
     expect(exchanges[0].status).toBe('error');
@@ -320,14 +316,7 @@ describe('error and interrupted turns', () => {
     await processQuery(query, CHAT_ROUTING, ['m1'], 'claude', undefined, 'prompt', undefined, true);
 
     expect(deliveredTexts()).toEqual(
-      progress
-        ? [
-            'Progress before failure.',
-            "Sorry, something went wrong and I couldn't answer. Whoever runs this NanoClaw can look into it using the logs: https://docs.nanoclaw.dev/operate/troubleshooting#start-here",
-          ]
-        : [
-            "Sorry, something went wrong and I couldn't answer. Whoever runs this NanoClaw can look into it using the logs: https://docs.nanoclaw.dev/operate/troubleshooting#start-here",
-          ],
+      progress ? ['Progress before failure.', GENERIC_FAILURE_NOTICE] : [GENERIC_FAILURE_NOTICE],
     );
     expect(pushes).toHaveLength(0);
   });
@@ -401,10 +390,7 @@ describe('error and interrupted turns', () => {
     ).rejects.toThrow('SDK stream died');
 
     // The mid-turn write is durable — an interrupted turn cannot claw it back.
-    expect(deliveredTexts()).toEqual([
-      'Sent before the crash.',
-      "Sorry, something went wrong and I couldn't answer. Whoever runs this NanoClaw can look into it using the logs: https://docs.nanoclaw.dev/operate/troubleshooting#start-here",
-    ]);
+    expect(deliveredTexts()).toEqual(['Sent before the crash.', GENERIC_FAILURE_NOTICE]);
   });
 });
 

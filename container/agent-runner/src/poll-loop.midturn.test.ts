@@ -5,6 +5,7 @@ import { getUndeliveredMessages } from './db/messages-out.js';
 import { processQuery } from './poll-loop.js';
 import { MockProvider } from './providers/mock.js';
 import type { AgentQuery, ProviderEvent } from './providers/types.js';
+import { GENERIC_FAILURE_NOTICE } from './formatter.js';
 
 beforeEach(() => {
   initTestSessionDb();
@@ -272,9 +273,7 @@ describe('mid-turn <message> block delivery', () => {
     const out = getUndeliveredMessages();
     expect(out).toHaveLength(2);
     expect(JSON.parse(out[0].content).text).toBe('Started on it.');
-    expect(JSON.parse(out[1].content).text).toBe(
-      "Sorry, something went wrong and I couldn't answer. Whoever runs this NanoClaw can look into it using the logs: https://docs.nanoclaw.dev/operate/troubleshooting#start-here",
-    );
+    expect(JSON.parse(out[1].content).text).toBe(GENERIC_FAILURE_NOTICE);
     expect(pushes).toHaveLength(0);
   });
 
@@ -292,7 +291,7 @@ describe('mid-turn <message> block delivery', () => {
 
     expect(getUndeliveredMessages().map((row) => JSON.parse(row.content).text)).toEqual([
       'Partial progress report.',
-      "Sorry, something went wrong and I couldn't answer. Whoever runs this NanoClaw can look into it using the logs: https://docs.nanoclaw.dev/operate/troubleshooting#start-here",
+      GENERIC_FAILURE_NOTICE,
     ]);
     expect(pushes).toHaveLength(0);
   });
